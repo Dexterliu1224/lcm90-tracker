@@ -1,0 +1,133 @@
+name: Build Windows exe
+
+# Same proven pipeline as telescope-tracker: install -> test -> build ->
+# SMOKE TEST the exe (launch it, hit the web page) -> upload artifact.
+# The smoke test is what catches PyInstaller's silent missing-module
+# failures before anyone downloads a broken exe.
+#
+# ASCII-only on purpose: this file travels through web editors and
+# clipboards where non-ASCII has been mangled before.
+on:
+  push:
+    branches: [main, master]
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller pytest
+
+      - name: Run tests
+        run: python -m pytest tests/ -q
+
+      # serve.py imports the app object directly (never a string path),
+      # and we still collect app/core explicitly: PyInstaller's static
+      # analysis has missed dynamically-imported modules here before.
+      - name: Build exe
+        run: >
+          pyinstaller
+          --noconfirm
+          --onefile
+          --console
+          --name lcm90-tracker
+          --add-data "app/static/index.html;app/static"
+          --collect-submodules app
+          --collect-submodules core
+          --collect-submodules uvicorn
+          --hidden-import app.main
+          --hidden-import uvicorn.loops.asyncio
+          --hidden-import uvicorn.protocols.http.h11_impl
+          --hidden-import uvicorn.protocols.http.httptools_impl
+          --hidden-import uvicorn.protocols.websockets.websockets_impl
+          --hidden-import uvicorn.lifespan.on
+          --hidden-import PIL._tkinter_finder
+          serve.py
+
+      - name: Assemble release folder
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path release/data | Out-Null
+          Copy-Item dist/lcm90-tracker.exe release/
+          Copy-Item config.yaml            release/
+          Copy-Item README.md              release/
+          Get-ChildItem -Recurse release | Select-Object FullName, Length
+
+      - name: Smoke test the exe
+        shell: pwsh
+        working-directory: release
+        run: |
+          # Onefile exe unpacks ~150 MB on first launch; poll, don't sleep once.
+          # stdout/stderr are captured so failures show the real error.
+          $p = Start-Process -FilePath .\lcm90-tracker.exe `
+                             -ArgumentList '--port','8323','--no-browser' `
+                             -PassThru -WindowStyle Hidden `
+                             -RedirectStandardOutput exe-stdout.txt `
+                             -RedirectStandardError  exe-stderr.txt
+          $ok = $false
+          try {
+            foreach ($i in 1..60) {
+              if ($p.HasExited) {
+                Write-Host "--- exe stdout ---"
+                if (Test-Path exe-stdout.txt) { Get-Content exe-stdout.txt }
+                Write-Host "--- exe stderr ---"
+                if (Test-Path exe-stderr.txt) { Get-Content exe-stderr.txt }
+                throw "exe exited immediately, code $($p.ExitCode)"
+              }
+              Start-Sleep -Seconds 2
+              try {
+                $r = Invoke-WebRequest -Uri http://127.0.0.1:8323/ `
+                                       -UseBasicParsing -TimeoutSec 5
+                if ($r.StatusCode -eq 200) { $ok = $true; break }
+              } catch { }
+            }
+            if (-not $ok) {
+              Write-Host "--- exe stdout ---"
+              if (Test-Path exe-stdout.txt) { Get-Content exe-stdout.txt }
+              Write-Host "--- exe stderr ---"
+              if (Test-Path exe-stderr.txt) { Get-Content exe-stderr.txt }
+              throw "web page still not reachable after 120 s"
+            }
+            $s = Invoke-WebRequest -Uri http://127.0.0.1:8323/api/status `
+                                   -UseBasicParsing -TimeoutSec 15
+            if ($s.StatusCode -ne 200) { throw "API returned $($s.StatusCode)" }
+            Write-Host "OK: exe starts, web page and API both respond"
+          } finally {
+            if (-not $p.HasExited) { Stop-Process -Id $p.Id -Force }
+            Remove-Item exe-stdout.txt, exe-stderr.txt -ErrorAction SilentlyContinue
+          }
+
+      - name: Upload build
+        uses: actions/upload-artifact@v4
+        with:
+          name: lcm90-tracker-windows
+          path: release/
+          retention-days: 90
+
+      - name: Zip for release
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        run: Compress-Archive -Path release/* -DestinationPath lcm90-tracker-windows.zip
+
+      - uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/v')
+        with:
+          files: lcm90-tracker-windows.zip

@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+
+# PyInstaller
+build/
+dist/
+release/
+*.spec
+
+# 运行时数据
+data/calibration.json
+diagnose.txt
+
+# 系统
+.DS_Store
+Thumbs.db

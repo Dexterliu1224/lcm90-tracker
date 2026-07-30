@@ -1,0 +1,560 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LCM90 视觉跟踪台</title>
+<style>
+/* ────────────────────────────────────────────────────────────────
+   深空控制台：黑底 + 星尘 + 青蓝强调 + 切角科技边框。
+   参考了用户教学平台的「切角面板 + 角标装饰」语言，
+   但配色走深空 —— 这是望远镜软件，画面本身就是星空。
+──────────────────────────────────────────────────────────────── */
+:root{
+  --bg0:#05070d; --bg1:#0a0f1c; --panel:rgba(13,20,36,.82);
+  --line:#1b2a45; --line2:#2b4570;
+  --text:#d6e4f5; --dim:#7b90ad; --faint:#45566e;
+  --cy:#4dd6ff; --cy2:#1d9fd6;
+  --ok:#41e896; --warn:#ffc257; --err:#ff5f7a;
+  --mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+  --sans:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;
+}
+*{box-sizing:border-box}
+html,body{height:100%}
+body{margin:0;background:var(--bg0);color:var(--text);
+     font:14px/1.55 var(--sans);overflow-x:hidden}
+
+/* 星空背景（两层视差微动） */
+#stars,#stars2{position:fixed;inset:0;pointer-events:none;z-index:0}
+#nebula{position:fixed;inset:0;pointer-events:none;z-index:0;
+  background:
+    radial-gradient(60% 42% at 78% -8%, rgba(29,120,190,.16), transparent 60%),
+    radial-gradient(48% 38% at 12% 108%, rgba(90,60,190,.12), transparent 60%),
+    radial-gradient(30% 22% at 50% 50%, rgba(20,60,120,.07), transparent 70%);}
+.app{position:relative;z-index:1;max-width:1460px;margin:0 auto;padding:0 18px 40px}
+
+/* ── 顶栏 ── */
+.topbar{display:flex;align-items:center;gap:14px;padding:14px 2px 12px;flex-wrap:wrap}
+.brand{display:flex;align-items:center;gap:11px}
+.brand .sigil{width:34px;height:34px;position:relative;flex:none}
+.brand .sigil svg{display:block}
+.brand h1{margin:0;font-size:17px;font-weight:700;letter-spacing:.14em}
+.brand h1 b{color:var(--cy);font-weight:700}
+.brand .sub{font:500 10px/1 var(--mono);letter-spacing:.34em;color:var(--faint);
+            margin-top:3px;text-transform:uppercase}
+.top-deco{flex:1;height:22px;min-width:60px;position:relative;overflow:hidden}
+.top-deco::before{content:"";position:absolute;left:0;right:0;top:50%;
+  height:1px;background:linear-gradient(90deg,var(--line2),transparent 85%)}
+.top-deco::after{content:"";position:absolute;left:0;top:calc(50% - 3px);
+  width:7px;height:7px;background:var(--cy);transform:rotate(45deg);opacity:.8}
+.statuses{display:flex;gap:8px;flex-wrap:wrap}
+.chip{font:600 11px/1 var(--mono);letter-spacing:.05em;padding:6px 11px;
+  background:var(--panel);border:1px solid var(--line);color:var(--dim);
+  clip-path:polygon(8px 0,100% 0,100% calc(100% - 8px),calc(100% - 8px) 100%,0 100%,0 8px)}
+.chip.on{color:var(--ok);border-color:rgba(65,232,150,.4)}
+.chip.warn{color:var(--warn);border-color:rgba(255,194,87,.4)}
+.chip.err{color:var(--err);border-color:rgba(255,95,122,.45)}
+.chip.cy{color:var(--cy);border-color:rgba(77,214,255,.4)}
+
+/* ── 切角面板 ── */
+.panel{position:relative;background:var(--panel);border:1px solid var(--line);
+  clip-path:polygon(16px 0,100% 0,100% calc(100% - 16px),calc(100% - 16px) 100%,0 100%,0 16px);
+  padding:16px;backdrop-filter:blur(3px)}
+.panel::before{content:"";position:absolute;top:0;left:0;width:52px;height:2px;
+  background:linear-gradient(90deg,var(--cy),transparent)}
+.panel::after{content:"";position:absolute;bottom:0;right:0;width:52px;height:2px;
+  background:linear-gradient(270deg,var(--cy),transparent)}
+.panel h2{margin:0 0 12px;font:700 11px/1 var(--sans);letter-spacing:.22em;
+  color:var(--cy);text-transform:uppercase;display:flex;align-items:center;gap:8px}
+.panel h2::after{content:"";flex:1;height:1px;
+  background:linear-gradient(90deg,var(--line2),transparent)}
+
+/* ── 布局 ── */
+.cols{display:grid;grid-template-columns:minmax(0,1fr) 330px;gap:14px;align-items:start}
+@media(max-width:1080px){.cols{grid-template-columns:1fr}}
+.stack{display:grid;gap:14px}
+
+/* ── 取景器 ── */
+.viewport{position:relative;background:#000;overflow:hidden;
+  clip-path:polygon(22px 0,100% 0,100% calc(100% - 22px),calc(100% - 22px) 100%,0 100%,0 22px);
+  border:1px solid var(--line2);aspect-ratio:16/9;cursor:crosshair;user-select:none}
+.viewport img{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;
+  -webkit-user-drag:none}
+.viewport .corner{position:absolute;width:26px;height:26px;pointer-events:none;z-index:4}
+.corner.tl{top:6px;left:6px;border-top:2px solid var(--cy);border-left:2px solid var(--cy)}
+.corner.tr{top:6px;right:6px;border-top:2px solid var(--cy);border-right:2px solid var(--cy)}
+.corner.bl{bottom:6px;left:6px;border-bottom:2px solid var(--cy);border-left:2px solid var(--cy)}
+.corner.br{bottom:6px;right:6px;border-bottom:2px solid var(--cy);border-right:2px solid var(--cy)}
+#selbox{position:absolute;border:1.5px dashed var(--cy);background:rgba(77,214,255,.08);
+  display:none;pointer-events:none;z-index:3;
+  box-shadow:0 0 0 1px rgba(0,0,0,.4), 0 0 14px rgba(77,214,255,.25)}
+.vp-hint{position:absolute;left:0;right:0;bottom:10px;text-align:center;z-index:2;
+  font:500 12px/1.5 var(--sans);color:rgba(214,228,245,.85);pointer-events:none;
+  text-shadow:0 1px 6px #000}
+.vp-hint b{color:var(--cy)}
+.scanline{position:absolute;inset:0;pointer-events:none;z-index:2;opacity:.5;
+  background:repeating-linear-gradient(0deg,transparent 0 3px,rgba(255,255,255,.012) 3px 4px)}
+
+/* ── 按钮 ── */
+.btn{cursor:pointer;font:600 13px/1 var(--sans);letter-spacing:.06em;
+  color:var(--text);background:rgba(27,42,69,.6);border:1px solid var(--line2);
+  padding:10px 16px;transition:.15s;
+  clip-path:polygon(9px 0,100% 0,100% calc(100% - 9px),calc(100% - 9px) 100%,0 100%,0 9px)}
+.btn:hover{border-color:var(--cy);color:var(--cy)}
+.btn:focus-visible{outline:2px solid var(--cy);outline-offset:2px}
+.btn:disabled{opacity:.38;cursor:not-allowed;pointer-events:none}
+.btn.primary{background:linear-gradient(135deg,var(--cy2),var(--cy));
+  color:#03121d;font-weight:700;border-color:transparent}
+.btn.primary:hover{filter:brightness(1.13);color:#03121d}
+.btn.danger{color:var(--err);border-color:rgba(255,95,122,.4)}
+.btn.danger:hover{background:rgba(255,95,122,.12)}
+.btnrow{display:flex;gap:9px;flex-wrap:wrap;align-items:center}
+
+/* ── 表单 ── */
+select,input[type=text]{font:inherit;color:var(--text);background:rgba(10,16,30,.8);
+  border:1px solid var(--line2);padding:9px 11px;min-width:0;
+  clip-path:polygon(7px 0,100% 0,100% calc(100% - 7px),calc(100% - 7px) 100%,0 100%,0 7px)}
+select:focus,input:focus{outline:1px solid var(--cy)}
+label.f{display:block;font:600 11px/1 var(--sans);color:var(--dim);
+  letter-spacing:.08em;margin:0 0 6px}
+.frow{display:grid;gap:10px;margin-bottom:12px}
+
+/* 视频源二选一 */
+.srcpick{display:grid;grid-template-columns:1fr 1fr;gap:9px;margin-bottom:12px}
+.srcopt{cursor:pointer;position:relative;padding:11px 12px;text-align:left;
+  font:inherit;color:var(--text);background:rgba(10,16,30,.7);
+  border:1px solid var(--line2);transition:.15s;
+  clip-path:polygon(10px 0,100% 0,100% calc(100% - 10px),calc(100% - 10px) 100%,0 100%,0 10px)}
+.srcopt:hover{border-color:var(--cy)}
+.srcopt[aria-pressed="true"]{border-color:var(--cy);
+  background:linear-gradient(160deg,rgba(77,214,255,.14),rgba(10,16,30,.7) 55%)}
+.srcopt .t{display:block;font-weight:700;font-size:13px;margin-bottom:3px}
+.srcopt .d{display:block;font-size:11px;color:var(--dim);line-height:1.5}
+.srcopt[aria-pressed="true"] .t{color:var(--cy)}
+
+/* ── 遥测 ── */
+.tele{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.cell{background:rgba(10,16,30,.72);border:1px solid var(--line);padding:8px 10px;
+  clip-path:polygon(7px 0,100% 0,100% calc(100% - 7px),calc(100% - 7px) 100%,0 100%,0 7px)}
+.cell .k{font:500 10px/1.3 var(--sans);color:var(--dim);letter-spacing:.06em}
+.cell .v{font:700 16px/1.3 var(--mono);font-variant-numeric:tabular-nums;margin-top:2px}
+.cell .v small{font-size:10px;font-weight:500;color:var(--dim)}
+.v.ok{color:var(--ok)} .v.warn{color:var(--warn)} .v.err{color:var(--err)}
+.v.cy{color:var(--cy)} .v.dim{color:var(--faint)}
+.cell.span{grid-column:1/-1}
+
+/* ── 流程指示 ── */
+.steps{display:grid;gap:0;counter-reset:st}
+.step{position:relative;display:flex;gap:11px;padding:9px 2px}
+.step::before{counter-increment:st;content:counter(st);flex:none;width:22px;height:22px;
+  display:grid;place-items:center;font:700 11px/1 var(--mono);color:var(--faint);
+  border:1px solid var(--line2);background:rgba(10,16,30,.8);
+  clip-path:polygon(5px 0,100% 0,100% calc(100% - 5px),calc(100% - 5px) 100%,0 100%,0 5px)}
+.step.done::before{color:#03121d;background:var(--ok);border-color:var(--ok);content:"✓"}
+.step.now::before{color:#03121d;background:var(--cy);border-color:var(--cy)}
+.step .tx{font-size:12.5px;color:var(--dim);line-height:1.5}
+.step.now .tx{color:var(--text)}
+.step .tx b{display:block;font-size:13px;color:inherit}
+.step:not(:last-child)::after{content:"";position:absolute;left:12px;top:32px;
+  bottom:-2px;width:1px;background:var(--line2)}
+
+/* 手动微调方向盘 */
+.pad{display:grid;grid-template-columns:repeat(3,44px);gap:6px;justify-content:center}
+.pad .btn{padding:10px 0;text-align:center;font-family:var(--mono)}
+.pad .ghost{visibility:hidden}
+
+/* 消息条 */
+#msgbar{margin-top:12px;font-size:13px;color:var(--dim);min-height:1.5em}
+#msgbar b{color:var(--text)}
+#msgbar.err{color:var(--err)}
+
+/* 标定进度 */
+#calibbox{display:none;margin-top:10px}
+.pbar{height:6px;background:rgba(10,16,30,.9);border:1px solid var(--line2);
+  clip-path:polygon(3px 0,100% 0,100% calc(100% - 3px),calc(100% - 3px) 100%,0 100%,0 3px)}
+.pbar i{display:block;height:100%;width:0;
+  background:linear-gradient(90deg,var(--cy2),var(--cy));transition:width .3s}
+#calibmsg{font-size:12px;color:var(--dim);margin-top:6px}
+
+/* 模态 —— 连接硬件 */
+dialog{border:1px solid var(--line2);background:var(--bg1);color:var(--text);
+  padding:0;max-width:430px;width:92vw;
+  clip-path:polygon(18px 0,100% 0,100% calc(100% - 18px),calc(100% - 18px) 100%,0 100%,0 18px)}
+dialog::backdrop{background:rgba(3,6,12,.75);backdrop-filter:blur(2px)}
+dialog .dhead{padding:14px 18px;border-bottom:1px solid var(--line);
+  font:700 12px/1 var(--sans);letter-spacing:.2em;color:var(--cy);text-transform:uppercase}
+dialog .dbody{padding:16px 18px;font-size:13px;line-height:1.7;color:var(--dim)}
+dialog .dbody b{color:var(--text)}
+dialog .dfoot{padding:12px 18px 16px;display:flex;gap:9px;justify-content:flex-end}
+.kbd{font:600 11px/1 var(--mono);background:rgba(27,42,69,.8);padding:2px 6px;
+  border:1px solid var(--line2);border-radius:3px}
+
+@media (prefers-reduced-motion: reduce){*{transition:none!important;animation:none!important}}
+</style>
+</head>
+<body>
+<canvas id="stars"></canvas><canvas id="stars2"></canvas><div id="nebula"></div>
+
+<div class="app">
+  <div class="topbar">
+    <div class="brand">
+      <div class="sigil">
+        <svg width="34" height="34" viewBox="0 0 34 34" fill="none" aria-hidden="true">
+          <path d="M17 2 L30 9.5 V24.5 L17 32 L4 24.5 V9.5 Z"
+                stroke="#4dd6ff" stroke-width="1.4" opacity=".9"/>
+          <circle cx="17" cy="17" r="6.5" stroke="#4dd6ff" stroke-width="1.2"/>
+          <circle cx="17" cy="17" r="1.8" fill="#4dd6ff"/>
+          <path d="M17 8.5 v4 M17 21.5 v4 M8.5 17 h4 M21.5 17 h4"
+                stroke="#4dd6ff" stroke-width="1.1" opacity=".8"/>
+        </svg>
+      </div>
+      <div>
+        <h1>LCM90 <b>视觉跟踪台</b></h1>
+        <div class="sub">Visual Target Tracker</div>
+      </div>
+    </div>
+    <div class="top-deco" aria-hidden="true"></div>
+    <div class="statuses">
+      <span class="chip" id="ch-mount">基座 未连接</span>
+      <span class="chip" id="ch-cam">相机 未开启</span>
+      <span class="chip" id="ch-calib">未标定</span>
+      <span class="chip" id="ch-state">待机</span>
+    </div>
+  </div>
+
+  <div class="cols">
+    <!-- ═══ 左：取景器 ═══ -->
+    <div class="stack">
+      <div class="panel">
+        <h2>取景器</h2>
+        <div class="viewport" id="vp">
+          <img id="feed" alt="相机画面" draggable="false">
+          <div class="scanline"></div>
+          <span class="corner tl"></span><span class="corner tr"></span>
+          <span class="corner bl"></span><span class="corner br"></span>
+          <div id="selbox"></div>
+          <div class="vp-hint" id="vphint">先在右侧开启视频源</div>
+        </div>
+        <div id="msgbar">—</div>
+        <div id="calibbox">
+          <div class="pbar"><i id="calibbar"></i></div>
+          <div id="calibmsg"></div>
+        </div>
+        <div class="btnrow" style="margin-top:12px">
+          <button class="btn primary" id="b-track" disabled>开始跟踪</button>
+          <button class="btn" id="b-calib" disabled>自动标定</button>
+          <button class="btn" id="b-clear" disabled>重选目标</button>
+          <button class="btn danger" id="b-stop" disabled>停止</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ═══ 右：设备与遥测 ═══ -->
+    <div class="stack">
+      <div class="panel">
+        <h2>望远镜</h2>
+        <div class="frow" style="grid-template-columns:1fr auto">
+          <select id="sel-port" aria-label="串口"><option value="">扫描串口 …</option></select>
+          <button class="btn" id="b-mount">连接</button>
+        </div>
+        <div id="mountinfo" style="font:11.5px/1.7 var(--mono);color:var(--faint)"></div>
+      </div>
+
+      <div class="panel">
+        <h2>视频源</h2>
+        <div class="srcpick" role="group" aria-label="画面来源">
+          <button class="srcopt" id="src-eye" aria-pressed="true">
+            <span class="t">目镜画面</span>
+            <span class="d">相机装在望远镜调焦座上，看到的就是望远镜看到的</span>
+          </button>
+          <button class="srcopt" id="src-ext" aria-pressed="false">
+            <span class="t">外部相机</span>
+            <span class="d">并联的广角相机，视野大，适合先找到目标</span>
+          </button>
+        </div>
+        <div class="frow" style="grid-template-columns:1fr auto">
+          <select id="sel-cam" aria-label="摄像头"><option value="">扫描摄像头 …</option></select>
+          <button class="btn" id="b-cam">开启</button>
+        </div>
+      </div>
+
+      <div class="panel">
+        <h2>遥测</h2>
+        <div class="tele">
+          <div class="cell"><div class="k">方位</div><div class="v" id="t-az">—</div></div>
+          <div class="cell"><div class="k">仰角</div><div class="v" id="t-alt">—</div></div>
+          <div class="cell"><div class="k">方位速率</div><div class="v" id="t-raz">—</div></div>
+          <div class="cell"><div class="k">仰角速率</div><div class="v" id="t-ralt">—</div></div>
+          <div class="cell"><div class="k">目标偏差</div><div class="v" id="t-err">—</div></div>
+          <div class="cell"><div class="k">跟踪置信度</div><div class="v" id="t-score">—</div></div>
+          <div class="cell span"><div class="k">画面 / 回路</div>
+            <div class="v dim" id="t-fps">— <small>fps</small> · — <small>Hz</small></div></div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <h2>手动微调</h2>
+        <div class="pad">
+          <span class="ghost"></span>
+          <button class="btn" data-n="0,1" aria-label="上">▲</button>
+          <span class="ghost"></span>
+          <button class="btn" data-n="-1,0" aria-label="左">◀</button>
+          <button class="btn" data-n="stop" aria-label="停">■</button>
+          <button class="btn" data-n="1,0" aria-label="右">▶</button>
+          <span class="ghost"></span>
+          <button class="btn" data-n="0,-1" aria-label="下">▼</button>
+          <span class="ghost"></span>
+        </div>
+        <p style="margin:10px 0 0;font-size:11px;color:var(--faint);text-align:center">
+          每次 0.1° · 把目标挪进画面用</p>
+      </div>
+
+      <div class="panel">
+        <h2>操作流程</h2>
+        <div class="steps" id="steps">
+          <div class="step" data-st="mount"><div class="tx"><b>连接望远镜</b>串口线插手控器底部</div></div>
+          <div class="step" data-st="cam"><div class="tx"><b>开启视频源</b>目镜相机或外部相机</div></div>
+          <div class="step" data-st="sel"><div class="tx"><b>框选 + 标定（首次）</b>先框一个静止参照物（远处建筑角、亮星），点「自动标定」让望远镜学会方向。只需做一次</div></div>
+          <div class="step" data-st="calib"><div class="tx"><b>框选要跟的目标</b>在画面里给目标拖一个框</div></div>
+          <div class="step" data-st="track"><div class="tx"><b>开始跟踪</b>目标会被一直保持在画面中心</div></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- 连接望远镜引导 -->
+<dialog id="dlg-mount">
+  <div class="dhead">连接 LCM90</div>
+  <div class="dbody" id="dlg-mount-body"></div>
+  <div class="dfoot">
+    <button class="btn" id="dlg-mount-close">知道了</button>
+    <button class="btn primary" id="dlg-mount-retry">重试</button>
+  </div>
+</dialog>
+
+<script>
+"use strict";
+const $=id=>document.getElementById(id);
+const api=async(p,body)=>{
+  const r=await fetch(p,body?{method:"POST",
+    headers:{"Content-Type":"application/json"},body:JSON.stringify(body)}:{});
+  const d=await r.json().catch(()=>({}));
+  if(!r.ok) throw new Error(d.detail||("HTTP "+r.status));
+  return d;
+};
+function say(t,isErr){ const m=$("msgbar"); m.innerHTML=t; m.className=isErr?"err":""; }
+
+/* ── 星空背景 ─────────────────────────────────────────── */
+function paintStars(cv,n,rmax,alpha){
+  const g=cv.getContext("2d");
+  const w=cv.width=innerWidth, h=cv.height=innerHeight;
+  g.clearRect(0,0,w,h);
+  let seed=42;
+  const rnd=()=> (seed=(seed*1103515245+12345)&0x7fffffff)/0x7fffffff;
+  for(let i=0;i<n;i++){
+    const x=rnd()*w, y=rnd()*h, r=rnd()*rmax+0.2, a=rnd()*alpha+0.05;
+    g.fillStyle=`rgba(190,214,240,${a})`;
+    g.beginPath(); g.arc(x,y,r,0,6.2832); g.fill();
+  }
+}
+function stars(){ paintStars($("stars"),210,1.1,.5); paintStars($("stars2"),70,1.7,.8); }
+stars(); addEventListener("resize",stars);
+
+/* ── 框选目标 ─────────────────────────────────────────── */
+const vp=$("vp"), sel=$("selbox");
+let drag=null, haveFeed=false;
+vp.addEventListener("pointerdown",e=>{
+  if(!haveFeed) return;
+  const r=vp.getBoundingClientRect();
+  drag={x0:e.clientX-r.left,y0:e.clientY-r.top,r};
+  vp.setPointerCapture(e.pointerId);
+});
+vp.addEventListener("pointermove",e=>{
+  if(!drag) return;
+  const x=e.clientX-drag.r.left, y=e.clientY-drag.r.top;
+  const l=Math.min(x,drag.x0), t=Math.min(y,drag.y0);
+  const w=Math.abs(x-drag.x0), h=Math.abs(y-drag.y0);
+  Object.assign(sel.style,{display:"block",left:l+"px",top:t+"px",width:w+"px",height:h+"px"});
+});
+vp.addEventListener("pointerup",async e=>{
+  if(!drag) return;
+  const x=e.clientX-drag.r.left, y=e.clientY-drag.r.top;
+  const l=Math.min(x,drag.x0), t=Math.min(y,drag.y0);
+  const w=Math.abs(x-drag.x0), h=Math.abs(y-drag.y0);
+  const W=drag.r.width, H=drag.r.height; drag=null;
+  if(w<10||h<10){ sel.style.display="none"; return; }
+  try{
+    const d=await api("/api/select",{box:[l/W,t/H,w/W,h/H]});
+    if(d.calibrated===false||$("ch-calib").textContent==="未标定"){
+      say("已选中。<b>下一步：自动标定</b>。标定测的是相机的方向和尺度，"+
+          "建议框<b>静止的参照物</b>（远处建筑角、亮星）来做；"+
+          "标定只需一次，之后换目标不用重标。");
+    }else{
+      say("目标已选中，可以<b>开始跟踪</b>。");
+    }
+  }catch(err){ say("选取失败："+err.message,true); }
+  setTimeout(()=>sel.style.display="none",600);
+});
+
+/* ── 视频源切换 ───────────────────────────────────────── */
+let preset="eyepiece";
+$("src-eye").onclick=()=>setPreset("eyepiece");
+$("src-ext").onclick=()=>setPreset("external");
+function setPreset(p){
+  preset=p;
+  $("src-eye").setAttribute("aria-pressed",String(p==="eyepiece"));
+  $("src-ext").setAttribute("aria-pressed",String(p==="external"));
+}
+
+/* ── 设备操作 ─────────────────────────────────────────── */
+async function scanPorts(){
+  try{
+    const d=await api("/api/ports");
+    const s=$("sel-port"); s.innerHTML="";
+    if(!d.ports.length){ s.innerHTML="<option value=''>（没找到串口）</option>"; }
+    d.ports.forEach(p=>{
+      const o=document.createElement("option");
+      o.value=p.device; o.textContent=p.device+(p.description?"  "+p.description:"");
+      s.appendChild(o);
+    });
+    const sim=document.createElement("option");
+    sim.value="__sim__"; sim.textContent="仿真基座（无硬件演示）";
+    s.appendChild(sim);
+  }catch(e){}
+}
+async function scanCams(){
+  try{
+    const d=await api("/api/cameras");
+    const s=$("sel-cam"); s.innerHTML="";
+    d.devices.forEach(c=>{
+      const o=document.createElement("option");
+      o.value=c.index; o.textContent=`摄像头 ${c.index}（${c.width}×${c.height}）`;
+      s.appendChild(o);
+    });
+    const sim=document.createElement("option");
+    sim.value="__sim__"; sim.textContent="仿真画面（无硬件演示）";
+    s.appendChild(sim);
+    if(!d.devices.length) s.value="__sim__";
+  }catch(e){}
+}
+
+$("b-mount").onclick=async()=>{
+  const v=$("sel-port").value;
+  try{
+    const d=await api("/api/mount/connect",{port:v==="__sim__"?null:v, sim:v==="__sim__"});
+    say(`望远镜已连接：<b>${d.driver==="simulator"?"仿真基座":d.port}</b>`+
+        (d.aligned===false?"（⚠ 手控器还没做 SkyAlign 校准，GoTo 不可用，但跟踪不受影响）":""));
+    $("mountinfo").textContent=
+      `固件 ${d.version||"—"} · ${d.aligned?"已校准":"未校准"} · 上限 ${d.max_rate_deg_s}°/s`;
+  }catch(err){ showMountHelp(err.message); }
+};
+function showMountHelp(reason){
+  $("dlg-mount-body").innerHTML=
+    `<b>没连上：</b>${reason}<br><br>逐条检查：<br>
+     1. 手控器<b>开机</b>了吗？<br>
+     2. 线插的是<b>手控器底部</b>的小方孔，不是基座上的 AUX 口<br>
+     3. 串口号选对了吗？（Windows 看设备管理器的「端口」）<br>
+     4. 有没有别的软件（如 Stellarium）占着这个串口？<br>
+     5. USB 转串口的<b>驱动</b>装了吗？（CH340 / FTDI）<br><br>
+     没有硬件想先试试？选「仿真基座」。`;
+  $("dlg-mount").showModal();
+}
+$("dlg-mount-close").onclick=()=>$("dlg-mount").close();
+$("dlg-mount-retry").onclick=()=>{ $("dlg-mount").close(); $("b-mount").click(); };
+
+$("b-cam").onclick=async()=>{
+  const v=$("sel-cam").value;
+  try{
+    await api("/api/camera/open",{source:v==="__sim__"?null:+v, sim:v==="__sim__", preset});
+    haveFeed=true;
+    $("feed").src="/video?"+Date.now();
+    $("vphint").innerHTML="在画面里<b>拖一个框</b>选中要跟的目标";
+    say("视频源已开启。");
+  }catch(err){ say("相机打开失败："+err.message+"。检查是不是被别的程序占用了。",true); }
+};
+
+$("b-calib").onclick=()=>api("/api/calibrate").catch(e=>say(e.message,true));
+$("b-track").onclick=()=>api("/api/track/start").catch(e=>say(e.message,true));
+$("b-stop").onclick=()=>api("/api/track/stop").catch(()=>{});
+$("b-clear").onclick=()=>api("/api/select/clear").then(()=>
+  say("已清除，重新在画面里框选目标。")).catch(()=>{});
+
+document.querySelectorAll(".pad .btn").forEach(b=>{
+  b.onclick=()=>{
+    const n=b.dataset.n;
+    if(n==="stop") return api("/api/track/stop").catch(()=>{});
+    const [a,e]=n.split(",").map(Number);
+    api("/api/nudge",{d_az:a*0.1,d_alt:e*0.1}).catch(err=>say(err.message,true));
+  };
+});
+
+/* ── 状态轮询 ─────────────────────────────────────────── */
+const ST_NAME={idle:"待机",selecting:"已选目标",calibrating:"标定中",
+               tracking:"跟踪中",lost:"目标丢失",error:"故障"};
+function setChip(id,txt,cls){ const c=$(id); c.textContent=txt; c.className="chip "+(cls||""); }
+function stepState(name,cls){
+  document.querySelectorAll(".step").forEach(s=>{
+    s.classList.remove("now","done");
+  });
+  const order=["mount","cam","sel","calib","track"];
+  const idx=order.indexOf(name);
+  document.querySelectorAll(".step").forEach((s,i)=>{
+    if(i<idx) s.classList.add("done");
+    if(i===idx) s.classList.add("now");
+  });
+}
+async function poll(){
+  try{
+    const s=await api("/api/status");
+    // 后端可能先于网页启动（或从别处控制），画面流要按实际状态自动接上，
+    // 不能只依赖本页的「开启」按钮
+    if(s.camera_opened&&!haveFeed){
+      haveFeed=true;
+      $("feed").src="/video?"+Date.now();
+      $("vphint").innerHTML="在画面里<b>拖一个框</b>选中要跟的目标";
+    }
+    const hasTarget=["selecting","calibrating","tracking","lost"].includes(s.state);
+    setChip("ch-mount", s.mount_connected?"基座 已连接":"基座 未连接",
+            s.mount_connected?"on":"");
+    setChip("ch-cam", s.camera_opened?"相机 已开启":"相机 未开启", s.camera_opened?"on":"");
+    setChip("ch-calib", s.calibrated?"已标定":"未标定", s.calibrated?"on":"warn");
+    setChip("ch-state", ST_NAME[s.state]||s.state,
+            s.state==="tracking"?"cy":(s.state==="lost"?"err":""));
+
+    $("t-az").innerHTML=s.az===null?"—":s.az.toFixed(2)+"<small>°</small>";
+    $("t-alt").innerHTML=s.alt===null?"—":s.alt.toFixed(2)+"<small>°</small>";
+    $("t-raz").innerHTML=s.rate_az.toFixed(3)+"<small>°/s</small>";
+    $("t-ralt").innerHTML=s.rate_alt.toFixed(3)+"<small>°/s</small>";
+    const e=$("t-err");
+    e.innerHTML=s.err_px===null?"—":Math.round(s.err_px)+"<small>px</small>";
+    e.className="v "+(s.err_px===null?"dim":(s.locked?"ok":"warn"));
+    const sc=$("t-score");
+    sc.innerHTML=s.score===null?"—":(s.score*100).toFixed(0)+"<small>%</small>";
+    sc.className="v "+(s.score===null?"dim":(s.score>0.5?"ok":"warn"));
+    $("t-fps").innerHTML=`${s.fps.toFixed(0)} <small>fps</small> · ${s.loop_hz.toFixed(0)} <small>Hz</small>`;
+
+    if(s.message) say(s.message, s.state==="error");
+    if(s.state==="calibrating"){
+      $("calibbox").style.display="block";
+      $("calibbar").style.width=(s.calib_progress*100).toFixed(0)+"%";
+      $("calibmsg").textContent=s.calib_message||"";
+    }else $("calibbox").style.display="none";
+
+    $("b-calib").disabled=!(s.camera_opened&&s.mount_connected&&hasTarget&&s.state!=="calibrating"&&s.state!=="tracking");
+    $("b-track").disabled=!(s.calibrated&&hasTarget&&s.state!=="tracking"&&s.state!=="calibrating");
+    $("b-stop").disabled=!(s.state==="tracking"||s.state==="lost"||s.state==="calibrating");
+    $("b-clear").disabled=!hasTarget;
+
+    if(!s.mount_connected) stepState("mount");
+    else if(!s.camera_opened) stepState("cam");
+    else if(!s.calibrated) stepState("sel");
+    else if(!hasTarget||s.state==="idle") stepState("calib");
+    else stepState("track");
+  }catch(e){}
+  setTimeout(poll,500);
+}
+scanPorts(); scanCams(); poll();
+</script>
+</body>
+</html>

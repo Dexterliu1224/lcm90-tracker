@@ -1,0 +1,45 @@
+# LCM90 视觉跟踪 · 配置
+# 改完重启生效
+
+mount:
+  driver: simulator          # nexstar = 真实 LCM90；simulator = 无硬件演示
+  port: ""                   # 空则由界面扫描选择（Windows 形如 COM3）
+  baudrate: 9600
+  max_rate_deg_s: 2.5        # LCM90 机械上限约 3°/s，留余量
+  min_rate_arcsec_s: 2.0     # 低于此速率不下发，避免齿隙抖动
+  alt_limit_min_deg: 5.0
+  alt_limit_max_deg: 88.0
+
+camera:
+  driver: simulator          # opencv = 真实相机；simulator = 合成演示画面
+  source: 0                  # opencv 设备号或视频地址
+  width: 1280
+  height: 720
+  fps: 30
+  # eyepiece = 相机装在望远镜调焦座上（视野窄、放大率高）
+  # external = 并联的外部相机/广角镜头（视野宽、容易找目标）
+  preset: eyepiece
+
+optics:
+  eyepiece: {focal_length_mm: 660.0, note: "相机直接装在 LCM90 调焦座上"}
+  external: {focal_length_mm: 25.0,  note: "并联的广角镜头/监控镜头"}
+
+tracker:
+  algo: csrt                 # csrt | kcf | mosse | template（自动降级）
+  max_lost: 25               # 连续丢这么多帧才判定目标丢失
+  min_score: 0.30            # 置信度低于此值视为跟踪失败
+  search_scale: 2.5          # 丢失后重捕的搜索窗放大倍数
+
+control:
+  loop_hz: 15
+  pid: {kp: 0.9, ki: 0.06, kd: 0.05, i_limit: 0.5, i_band: 0.4}
+  lock_radius_px: 30
+  deadband_px: 2             # 残差小于此值不动基座，防抖
+
+calibration:
+  step_deg: 0.30             # 标定时每步走多少度
+  settle_s: 1.2              # 每步之后等基座停稳的时间
+  samples: 3                 # 每个位置取几帧平均
+  file: data/calibration.json
+
+server: {host: "127.0.0.1", port: 8300}

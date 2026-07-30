@@ -1,0 +1,7 @@
+fastapi>=0.110
+uvicorn[standard]>=0.29
+pyyaml>=6.0
+numpy>=1.24
+opencv-python>=4.8
+pyserial>=3.5
+pillow>=10.0
