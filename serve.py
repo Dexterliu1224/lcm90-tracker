@@ -1,29 +1,64 @@
 #!/usr/bin/env python3
 """启动 LCM90 视觉跟踪台。
 
-    python serve.py              # 默认 http://127.0.0.1:8300
+默认是一个**独立的桌面窗口**（不弹浏览器）：
+后端 uvicorn 跑在后台线程，界面装在系统自带的 WebView 里。
+
+    python serve.py                 # 桌面窗口
+    python serve.py --browser       # 退回浏览器模式（窗口起不来时用）
+    python serve.py --no-window     # 只跑服务、不开窗（自动化/远程访问用）
     python serve.py --port 8400
-    python serve.py --verbose    # 排查问题时打开完整日志
+    python serve.py --verbose       # 排查问题时打开完整日志
+    python serve.py --check         # 自检：确认 WebView 组件齐全后退出
 """
 from __future__ import annotations
 
 import argparse
 import logging
 import os
+import socket
 import sys
 import threading
 import time
 import webbrowser
 
+logger = logging.getLogger("serve")
+
+
+def _app_root() -> str:
+    """程序所在目录。打包成 exe 后 __file__ 指向临时解压目录，
+    配置/数据必须跟着 exe 走，用户改了才生效。"""
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(os.path.abspath(sys.executable))
+    return os.path.dirname(os.path.abspath(__file__))
+
 
 def _force_utf8_output() -> None:
-    """UTF-8 输出 + 行缓冲。
+    """UTF-8 输出 + 行缓冲，并保证 stdout/stderr 一定可写。
 
-    Windows 控制台默认用系统 ANSI 编码（英文系统 cp1252 编不了中文），
-    第一句中文 print 就会把进程打死；输出被重定向时 Python 还会改成
-    块缓冲，窗口长时间一片空白。两个坑一起堵上。
+    两个坑：
+      1. Windows 控制台默认用系统 ANSI 编码（英文系统 cp1252 编不了中文），
+         第一句中文 print 就会把进程打死；输出被重定向时还会变成块缓冲。
+      2. 打包成**无控制台**的窗口程序后，sys.stdout / sys.stderr 直接是
+         None —— 任何一句 print 都会抛 AttributeError，而且因为没有控制台，
+         用户只看到程序闪一下就没了，毫无线索。
+    所以没有 stdout 时把它接到 exe 旁边的日志文件上。
     """
-    for stream in (sys.stdout, sys.stderr):
+    log_path = os.path.join(_app_root(), "data", "app.log")
+    for name in ("stdout", "stderr"):
+        stream = getattr(sys, name, None)
+        if stream is None:
+            try:
+                os.makedirs(os.path.dirname(log_path), exist_ok=True)
+                fh = open(log_path, "a", encoding="utf-8", buffering=1)
+                setattr(sys, name, fh)
+            except Exception:
+                # 连日志都写不了也不能崩：接一个黑洞，让 print 静默成功
+                try:
+                    setattr(sys, name, open(os.devnull, "w"))
+                except Exception:
+                    pass
+            continue
         try:
             stream.reconfigure(encoding="utf-8", errors="replace",
                                line_buffering=True)
@@ -37,77 +72,225 @@ if not getattr(sys, "frozen", False):
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 
+def _port_is_free(host: str, port: int) -> bool:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            s.bind((host, port))
+            return True
+        except OSError:
+            return False
+
+
+def _pick_port(host: str, port: int, tries: int = 20) -> int:
+    """配置端口被占就顺延。
+
+    教学现场最常见的情况是「上一个实例还没退干净就又双击了一次」，
+    此时直接报错退出对用户毫无意义 —— 他既看不懂端口冲突，
+    也不知道去任务管理器杀进程。换个端口继续跑就是了。
+    """
+    for offset in range(tries):
+        if _port_is_free(host, port + offset):
+            return port + offset
+    return port
+
+
+def _wait_until_serving(host: str, port: int, timeout_s: float = 30.0) -> bool:
+    """等到端口真的能连上再开窗。
+
+    先开窗后启动服务的话，WebView 会抢在服务就绪前加载，
+    拿到 ERR_CONNECTION_REFUSED 并停在一个白屏上不再重试。
+    """
+    deadline = time.monotonic() + timeout_s
+    probe_host = "127.0.0.1" if host in ("0.0.0.0", "") else host
+    while time.monotonic() < deadline:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.settimeout(0.5)
+            if s.connect_ex((probe_host, port)) == 0:
+                return True
+        time.sleep(0.2)
+    return False
+
+
+def _check_webview() -> int:
+    """自检 WebView 组件是否齐全。CI 拿它验证打包结果 ——
+    GUI 窗口在无头环境里开不出来，但「模块能不能导入」正是
+    PyInstaller 最容易漏掉的东西，而这一项测得到。"""
+    try:
+        import webview  # noqa: F401
+    except Exception as exc:
+        print("x WebView 组件不可用：%s" % exc)
+        return 1
+    print("OK WebView 组件已就绪（pywebview 可导入）")
+    if sys.platform == "win32":
+        try:
+            import clr  # noqa: F401  pythonnet，EdgeChromium 后端要用
+            print("OK pythonnet 已就绪（Edge WebView2 后端）")
+        except Exception as exc:
+            print("!  pythonnet 不可用：%s —— 窗口模式会退回浏览器" % exc)
+    return 0
+
+
+def _open_window(url: str, on_closed) -> bool:
+    """开原生窗口。返回 False 表示开不出来（调用方应退回浏览器）。"""
+    try:
+        import webview
+    except Exception as exc:
+        logger.warning("无法加载 WebView 组件：%s", exc)
+        print("\n  ! 打不开程序窗口：%s" % exc)
+        return False
+
+    try:
+        window = webview.create_window(
+            "LCM90 视觉跟踪台", url,
+            width=1440, height=920, min_size=(1100, 720),
+            background_color="#050A14",   # 和页面同底色，避免加载时白屏闪一下
+            text_select=False)
+        try:
+            window.events.closed += on_closed
+        except Exception:
+            # 不同版本的事件 API 略有差异；订阅不上不影响主流程，
+            # webview.start() 返回后照样会收尾。
+            logger.debug("订阅窗口关闭事件失败", exc_info=True)
+        webview.start()      # 阻塞，直到用户关掉窗口
+        return True
+    except Exception as exc:
+        logger.exception("创建程序窗口失败")
+        print("\n  ! 程序窗口创建失败：%s" % exc)
+        if sys.platform == "win32":
+            print("    这台电脑可能缺少 Microsoft Edge WebView2 运行时。")
+            print("    到 https://go.microsoft.com/fwlink/p/?LinkId=2124703 "
+                  "装一次「Evergreen Bootstrapper」即可，装完重开本程序。")
+        return False
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--host", default=None)
     ap.add_argument("--port", type=int, default=None)
-    ap.add_argument("--no-browser", action="store_true")
+    ap.add_argument("--browser", action="store_true",
+                    help="用浏览器打开而不是程序窗口")
+    ap.add_argument("--no-window", action="store_true",
+                    help="只启动服务，不开窗也不开浏览器")
+    ap.add_argument("--no-browser", action="store_true",
+                    help="等同 --no-window（保留旧参数名）")
     ap.add_argument("--verbose", action="store_true",
                     help="打印每一条网页请求，排查问题时才需要")
+    ap.add_argument("--check", action="store_true",
+                    help="自检 WebView 组件后退出")
     args = ap.parse_args()
 
+    if args.check:
+        return _check_webview()
+
     import yaml
-    # 打包成 exe 后 __file__ 指向临时解压目录；配置必须跟着 exe 走，
-    # 用户改了才生效。
-    if getattr(sys, "frozen", False):
-        root = os.path.dirname(os.path.abspath(sys.executable))
-    else:
-        root = os.path.dirname(os.path.abspath(__file__))
+    root = _app_root()
     try:
         with open(os.path.join(root, "config.yaml"), "r", encoding="utf-8") as fh:
             cfg = yaml.safe_load(fh) or {}
     except FileNotFoundError:
-        print("✗ 找不到 config.yaml，它应该和本程序在同一个文件夹里。")
+        print("x 找不到 config.yaml，它应该和本程序在同一个文件夹里。")
         return 1
 
-    server = cfg.get("server", {}) or {}
-    host = args.host or server.get("host", "127.0.0.1")
-    port = args.port or int(server.get("port", 8300))
+    server_cfg = cfg.get("server", {}) or {}
+    host = args.host or server_cfg.get("host", "127.0.0.1")
+    want_port = args.port or int(server_cfg.get("port", 8300))
+    port = _pick_port(host, want_port)
     url = "http://127.0.0.1:%d" % port
 
+    headless = args.no_window or args.no_browser
+    windowed = not headless and not args.browser
+
     print()
-    print("  ┌" + "─" * 50 + "┐")
-    print("  │  LCM90 视觉跟踪台" + " " * 32 + "│")
-    print("  └" + "─" * 50 + "┘")
+    print("  +" + "-" * 50 + "+")
+    print("  |  LCM90 视觉跟踪台" + " " * 32 + "|")
+    print("  +" + "-" * 50 + "+")
     print()
+    if port != want_port:
+        print("    端口 %d 被占用，已改用 %d。" % (want_port, port))
     print("    控制台地址   %s" % url)
-    print("    浏览器会自动打开。要退出程序，直接关掉这个窗口。")
+    if windowed:
+        print("    程序窗口即将打开。关掉窗口即退出程序。")
+    elif args.browser:
+        print("    浏览器会自动打开。要退出程序，直接关掉这个窗口。")
     print("    这里平时不会输出东西 —— 出问题时才会打印原因。")
     print()
-
-    if not args.no_browser:
-        def _open():
-            time.sleep(2.0)
-            try:
-                webbrowser.open(url)
-            except Exception:
-                pass
-        threading.Thread(target=_open, daemon=True).start()
 
     logging.basicConfig(
         level=logging.INFO if args.verbose else logging.WARNING,
         format="  %(levelname)s  %(message)s")
 
     import uvicorn
-    try:
-        # 直接导入 app 对象（不是字符串路径）—— PyInstaller 的静态分析
-        # 看不见字符串里的模块名，打包 exe 会缺模块，启动即退。
-        from app.main import app
-        uvicorn.run(app, host=host, port=port,
-                    log_level="info" if args.verbose else "warning",
-                    access_log=args.verbose, use_colors=False)
-    except OSError as exc:
-        print("\n  ✗ 启动失败：%s" % exc)
+    # 直接导入 app 对象（不是字符串路径）—— PyInstaller 的静态分析
+    # 看不见字符串里的模块名，打包 exe 会缺模块，启动即退。
+    from app.main import app
+
+    config = uvicorn.Config(app, host=host, port=port,
+                            log_level="info" if args.verbose else "warning",
+                            access_log=args.verbose, use_colors=False)
+    server = uvicorn.Server(config)
+
+    if headless:
+        try:
+            server.run()
+        except OSError as exc:
+            print("\n  x 启动失败：%s" % exc)
+            return 1
+        except KeyboardInterrupt:
+            pass
+        return 0
+
+    # 窗口/浏览器模式：服务放后台线程，主线程留给 GUI
+    # （GUI 框架几乎都要求自己待在主线程上）。
+    failure: dict = {}
+
+    def _serve():
+        try:
+            server.run()
+        except Exception as exc:      # noqa: BLE001 —— 要带回主线程报给用户
+            failure["exc"] = exc
+            logger.exception("服务线程异常退出")
+
+    thread = threading.Thread(target=_serve, name="uvicorn", daemon=True)
+    thread.start()
+
+    if not _wait_until_serving(host, port):
+        exc = failure.get("exc")
+        print("\n  x 服务没能起来%s" % ("：%s" % exc if exc else "（超时）"))
         print("    端口 %d 可能被占用，改 config.yaml 里的 port 再试。" % port)
         return 1
-    except KeyboardInterrupt:
-        pass
+
+    def _on_closed():
+        # 窗口一关就让服务退出，FastAPI 的 shutdown 会停录像、停基座。
+        server.should_exit = True
+
+    opened = False
+    if windowed:
+        opened = _open_window(url, _on_closed)
+        if not opened:
+            print("    已改用浏览器打开。下次也可以直接加 --browser 参数。")
+
+    if not opened:
+        try:
+            webbrowser.open(url)
+        except Exception:
+            pass
+        print("    要退出程序，直接关掉这个窗口。")
+        try:
+            while thread.is_alive():
+                thread.join(timeout=0.5)
+        except KeyboardInterrupt:
+            pass
+
+    # 收尾：停服务并等它把 shutdown 事件跑完（录像文件要正常收口）
+    server.should_exit = True
+    thread.join(timeout=10.0)
     return 0
 
 
 if __name__ == "__main__":
     code = main()
-    if code != 0 and getattr(sys, "frozen", False):
+    if code != 0 and getattr(sys, "frozen", False) and sys.stdout is not None:
         try:
             input("\n按回车键关闭...")
         except (EOFError, OSError):

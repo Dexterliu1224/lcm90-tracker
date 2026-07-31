@@ -5,3 +5,6 @@ numpy>=1.24
 opencv-python>=4.8
 pyserial>=3.5
 pillow>=10.0
+# 桌面窗口外壳。Windows 上走系统自带的 Edge WebView2，
+# 会一并带上 pythonnet；装不上或运行时缺组件时程序自动退回浏览器模式。
+pywebview>=5.0

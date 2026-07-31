@@ -94,8 +94,13 @@ if not exist ".venv\Scripts\python.exe" (
     echo.
 )
 
-echo [2/2] Starting. Your browser should open in a few seconds.
-echo       To stop the program: press Ctrl+C here, or close this window.
+echo [2/2] Starting. The application window opens in a few seconds.
+echo       To stop the program: close that window (or press Ctrl+C here).
+echo.
+echo       If the window does not appear, this PC is probably missing the
+echo       Edge WebView2 runtime. Install it once from
+echo       https://go.microsoft.com/fwlink/p/?LinkId=2124703
+echo       The program falls back to your browser meanwhile.
 echo.
 
 ".venv\Scripts\python.exe" serve.py

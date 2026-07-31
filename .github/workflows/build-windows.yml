@@ -45,13 +45,22 @@ jobs:
       # serve.py imports the app object directly (never a string path),
       # and we still collect app/core explicitly: PyInstaller's static
       # analysis has missed dynamically-imported modules here before.
+      # --onedir, not --onefile: a onefile exe unpacks ~150 MB to a temp dir
+      # on EVERY launch, so the user double-clicks and stares at nothing for
+      # half a minute. With --windowed there is not even a console to show
+      # progress, so they double-click again and get two instances.
+      # --windowed: this is a desktop app now (pywebview window), a black
+      # console box behind it looks broken. serve.py redirects stdout to
+      # data/app.log when there is no console, so crashes stay diagnosable.
       - name: Build exe
         run: >
           pyinstaller
           --noconfirm
-          --onefile
-          --console
+          --onedir
+          --windowed
           --name lcm90-tracker
+          --collect-all webview
+          --hidden-import clr
           --add-data "app/static/index.html;app/static"
           --add-data "app/static/login.html;app/static"
           --collect-submodules app
@@ -69,20 +78,39 @@ jobs:
       - name: Assemble release folder
         shell: pwsh
         run: |
+          New-Item -ItemType Directory -Force -Path release | Out-Null
+          # --onedir puts the exe plus its _internal folder under dist/<name>/
+          Copy-Item dist/lcm90-tracker/* release/ -Recurse -Force
           New-Item -ItemType Directory -Force -Path release/data | Out-Null
-          Copy-Item dist/lcm90-tracker.exe release/
           Copy-Item config.yaml            release/
           Copy-Item README.md              release/
-          Get-ChildItem -Recurse release | Select-Object FullName, Length
+          Get-ChildItem release | Select-Object Name, Length
+
+      # The GUI window itself cannot be opened on a headless runner, but the
+      # thing that actually breaks in packaging is "pywebview/pythonnet did
+      # not get bundled" - and --check tests exactly that, headlessly.
+      - name: Check the WebView components got packaged
+        shell: pwsh
+        working-directory: release
+        run: |
+          $out = & .\lcm90-tracker.exe --check 2>&1 | Out-String
+          Write-Host $out
+          if ($LASTEXITCODE -ne 0) { throw "--check failed with $LASTEXITCODE" }
+          if ($out -notmatch 'WebView') {
+            # --windowed exes have no console, so the text lands in the log
+            if (Test-Path data/app.log) { Get-Content data/app.log -Tail 40 }
+            throw "--check produced no WebView report"
+          }
 
       - name: Smoke test the exe
         shell: pwsh
         working-directory: release
         run: |
-          # Onefile exe unpacks ~150 MB on first launch; poll, don't sleep once.
-          # stdout/stderr are captured so failures show the real error.
+          # --no-window: the HTTP server still comes up, we just skip the GUI.
+          # stdout/stderr are captured so failures show the real error; with
+          # --windowed they are usually empty and data/app.log has the goods.
           $p = Start-Process -FilePath .\lcm90-tracker.exe `
-                             -ArgumentList '--port','8323','--no-browser' `
+                             -ArgumentList '--port','8323','--no-window' `
                              -PassThru -WindowStyle Hidden `
                              -RedirectStandardOutput exe-stdout.txt `
                              -RedirectStandardError  exe-stderr.txt
@@ -94,6 +122,8 @@ jobs:
                 if (Test-Path exe-stdout.txt) { Get-Content exe-stdout.txt }
                 Write-Host "--- exe stderr ---"
                 if (Test-Path exe-stderr.txt) { Get-Content exe-stderr.txt }
+                Write-Host "--- data/app.log ---"
+                if (Test-Path data/app.log) { Get-Content data/app.log -Tail 60 }
                 throw "exe exited immediately, code $($p.ExitCode)"
               }
               Start-Sleep -Seconds 2
@@ -110,6 +140,8 @@ jobs:
               if (Test-Path exe-stdout.txt) { Get-Content exe-stdout.txt }
               Write-Host "--- exe stderr ---"
               if (Test-Path exe-stderr.txt) { Get-Content exe-stderr.txt }
+              Write-Host "--- data/app.log ---"
+              if (Test-Path data/app.log) { Get-Content data/app.log -Tail 60 }
               throw "login page still not reachable after 120 s"
             }
 
