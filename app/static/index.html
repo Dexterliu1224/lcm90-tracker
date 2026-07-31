@@ -343,6 +343,10 @@ const api=async(p,body)=>{
   if(!r.ok) throw new Error(d.detail||("HTTP "+r.status));
   return d;
 };
+// 动作类接口一律走这个：api() 只在带 body 时才发 POST，
+// 无参调用会退化成 GET，后端直接回 405 Method Not Allowed ——
+// 标定/跟踪按钮就是这么坏掉的（尤其"停止"还把错误吞了）。
+const act=(p,body)=>api(p,body||{});
 function say(t,isErr){ const m=$("msgbar"); m.innerHTML=t; m.className=isErr?"err":""; }
 
 /* ── 星空背景 ─────────────────────────────────────────── */
@@ -474,16 +478,16 @@ $("b-cam").onclick=async()=>{
   }catch(err){ say("相机打开失败："+err.message+"。检查是不是被别的程序占用了。",true); }
 };
 
-$("b-calib").onclick=()=>api("/api/calibrate").catch(e=>say(e.message,true));
-$("b-track").onclick=()=>api("/api/track/start").catch(e=>say(e.message,true));
-$("b-stop").onclick=()=>api("/api/track/stop").catch(()=>{});
-$("b-clear").onclick=()=>api("/api/select/clear").then(()=>
+$("b-calib").onclick=()=>act("/api/calibrate").catch(e=>say(e.message,true));
+$("b-track").onclick=()=>act("/api/track/start").catch(e=>say(e.message,true));
+$("b-stop").onclick=()=>act("/api/track/stop").catch(()=>{});
+$("b-clear").onclick=()=>act("/api/select/clear").then(()=>
   say("已清除，重新在画面里框选目标。")).catch(()=>{});
 
 document.querySelectorAll(".pad .btn").forEach(b=>{
   b.onclick=()=>{
     const n=b.dataset.n;
-    if(n==="stop") return api("/api/track/stop").catch(()=>{});
+    if(n==="stop") return act("/api/track/stop").catch(()=>{});
     const [a,e]=n.split(",").map(Number);
     api("/api/nudge",{d_az:a*0.1,d_alt:e*0.1}).catch(err=>say(err.message,true));
   };
