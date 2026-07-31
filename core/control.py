@@ -28,10 +28,10 @@ import numpy as np
 # 直接以脚本方式运行（python core/control.py）时 sys.path[0] 是 core/，
 # 包内导入会失败；把项目根目录补进去，两种运行方式都能工作。
 try:
-    from core.calibration import Calibration, Calibrator
+    from core.calibration import CAL_VERSION, Calibration, Calibrator
 except ImportError:  # pragma: no cover
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    from core.calibration import Calibration, Calibrator
+    from core.calibration import CAL_VERSION, Calibration, Calibrator
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +59,25 @@ _STATE_EN = {
     "idle": "idle", "selecting": "selected", "calibrating": "calibrating",
     "tracking": "tracking", "lost": "LOST", "error": "ERROR",
 }
+
+#: 退出「锁定保持」的迟滞倍数：进环靠 hold_radius_px，出环要超过它的这个倍数。
+#: 没有迟滞的话，残差在环边缘抖动会让基座每秒切换十几次推/不推。
+_HOLD_EXIT_RATIO = 1.6
+
+#: 进入保持带后先硬性停车这么久，再开始估计目标自身的角速度。
+#: 刚进环的这一瞬间基座还在减速，像素速度里全是「基座造成的」运动，
+#: 拿它去估目标速度会得到一个反向的假值，基座会先倒踢一下才停 ——
+#: 和标定里「停稳再采样」是同一个道理。
+_HOLD_SETTLE_S = 0.6
+
+# ---- 反向标定的自动识别 ----------------------------------------------------
+# 标定矩阵的符号错了，闭环会朝着**加大**误差的方向修，目标越修越远，
+# 而界面上一切正常（状态"跟踪中"、有速率、有置信度）—— 契约里点名的
+# 「最危险的一种看起来在工作的故障」。既然回路自己看得见误差在涨，
+# 就该由它停车报警，而不是让用户盯着望远镜猜。
+_DIVERGE_WINDOW_S = 3.0     # 观察窗：短于此不下结论（捕获阶段本来就会先冲一下）
+_DIVERGE_GROWTH = 1.8       # 窗内误差涨到这个倍数即判定发散
+_DIVERGE_MIN_PX = 12.0      # 起始误差小于此值不判定：纯噪声也能翻倍
 
 
 class PID:
@@ -176,6 +195,10 @@ class TrackingSession:
         self._loop_hz = float(ctrl.get("loop_hz", 15))
         self._lock_radius_px = float(ctrl.get("lock_radius_px", 30))
         self._deadband_px = float(ctrl.get("deadband_px", 2))
+        # 保持带默认就取锁定环半径：画面上画的绿圈和「基座停不停」必须是
+        # 同一个判据，否则圈变绿了基座还在动，用户只会觉得软件在乱转。
+        self._hold_radius_px = float(ctrl.get("hold_radius_px",
+                                              self._lock_radius_px))
         self._pid_cfg = dict(ctrl.get("pid", {}) or {})
 
         self._lock = threading.RLock()          # 状态与设备句柄
@@ -205,6 +228,10 @@ class TrackingSession:
         self._rate_alt = 0.0
         self._ff_az = 0.0
         self._ff_alt = 0.0
+        self._in_hold = False          # 是否处于「锁定保持」（进环即停推）
+        self._hold_t0 = 0.0
+        self._diverge_t0 = None        # type: Optional[float]
+        self._diverge_err0 = 0.0
 
         # 仰角缓存：真实基座查一次坐标要走串口（几十 ms），
         # 15Hz 控制回路里每拍都查会把回路拖垮，1 秒刷新一次足够
@@ -263,7 +290,16 @@ class TrackingSession:
         try:
             with open(path, "r", encoding="utf-8") as fh:
                 cal = Calibration.from_dict(json.load(fh))
-            if cal.ok:
+            if cal.ok and cal.ver < CAL_VERSION:
+                # 旧版存档没经过质量闸，可能是一份方向解反的矩阵；
+                # 恢复它比不恢复更危险（界面会显示「已标定」，用户不会重标）。
+                with self._lock:
+                    self._message = ("上次的标定存档是旧版本、没经过质量校验，"
+                                     "已忽略。请重新标定一次（对着静止参照物，"
+                                     "约半分钟）。")
+                logger.warning("忽略旧版标定存档（ver=%d < %d）：%s",
+                               cal.ver, CAL_VERSION, path)
+            elif cal.ok:
                 with self._lock:
                     self._calibration = cal
                 logger.info("已从 %s 恢复标定（%.2f\"/px）。"
@@ -297,12 +333,78 @@ class TrackingSession:
                 self._alt_cache_ts = now
         return self._alt_cache
 
+    def _enter_hold(self) -> None:
+        """进入锁定保持：卸掉 PID 历史与前馈，从「停住」重新起算。
+
+        前馈必须清零，否则它会自己把自己锁住：保持带里下发的速率就是前馈，
+        而前馈的新估计 = 已下发速率 + 像素速度折算，静止目标像素速度为 0，
+        于是 ff 恒等于自身，基座带着进环那一刻的速率一直匀速转下去 ——
+        正是「都套住了还在转」。从 0 起算则相反：目标真在飞，像素速度会
+        把前馈重新推上去；目标不动，它就一直是 0。
+        """
+        if not self._in_hold:
+            self._in_hold = True
+            self._hold_t0 = time.monotonic()
+            self._pid_az.reset()
+            self._pid_alt.reset()
+            self._ff_az = 0.0
+            self._ff_alt = 0.0
+        self._diverge_t0 = None
+
+    def _check_diverging(self, err_px: float) -> bool:
+        """闭环期间误差是否在持续变大 —— 标定方向反了的典型特征。
+
+        返回 True 表示已判定发散并停车。判据刻意保守：
+          * 只在闭环（非保持带）里看，保持带本来就不修正；
+          * 误差要连续几秒只涨不跌、且长到近两倍，起始误差还得够大，
+            避免把噪声和捕获阶段的正常过冲当成故障。
+
+        注意**不能**因为「速率已经撞上限」就放过：符号反了的时候前馈会
+        自激（它估的目标速度符号同样是反的），基座几秒内就顶到最大速率
+        一路转下去 —— 撞限恰恰是这个故障最典型的样子，不是豁免理由。
+        另一种可能是目标真的快过基座，但那时候停车同样是唯一正确的动作：
+        全速转还在丢目标，再转下去只会撞限位。
+        """
+        now = time.monotonic()
+        if err_px < _DIVERGE_MIN_PX:
+            self._diverge_t0 = None
+            return False
+        if self._diverge_t0 is None or err_px < self._diverge_err0:
+            # 误差在缩小（哪怕只是这一拍）就重新计时：方向对的回路不会
+            # 连续几秒只涨不跌。
+            self._diverge_t0 = now
+            self._diverge_err0 = err_px
+            return False
+        if now - self._diverge_t0 < _DIVERGE_WINDOW_S:
+            return False
+        if err_px < self._diverge_err0 * _DIVERGE_GROWTH:
+            return False
+
+        err0 = self._diverge_err0
+        self._diverge_t0 = None
+        self._zero_rates()
+        logger.error("跟踪误差持续增大（%.0f→%.0f 像素 / %.1fs），"
+                     "判定标定方向相反，已停车", err0, err_px, _DIVERGE_WINDOW_S)
+        self.stop_tracking()
+        with self._lock:
+            self._message = (
+                "误差在 %.0f 秒里从 %.0f 像素涨到 %.0f 像素——基座在把目标"
+                "越推越远，已自动停转。最常见的原因是「标定的方向反了」："
+                "请对着静止的参照物（远处建筑物的角、亮星）重新标定一次，"
+                "标定时不要框飞机、云这类自己在动的东西。"
+                "如果重标之后仍然如此，那就是目标动得比基座还快，"
+                "换视野更大的外部相机再试。"
+                % (_DIVERGE_WINDOW_S, err0, err_px))
+        return True
+
     def _zero_rates(self, reset_pid: bool = True) -> None:
         """速率清零是安全动作，必须尽力送达；失败要记日志并转 error。"""
         self._rate_az = 0.0
         self._rate_alt = 0.0
         self._ff_az = 0.0
         self._ff_alt = 0.0
+        self._in_hold = False
+        self._diverge_t0 = None
         if reset_pid:
             self._pid_az.reset()
             self._pid_alt.reset()
@@ -362,22 +464,25 @@ class TrackingSession:
             logger.exception("读取基座信息失败")
             return {}
 
-    def disconnect_mount(self) -> None:
-        with self._lock:
-            if self._state in ("tracking", "lost"):
-                self.stop_tracking()
-            mount = self._mount
-            self._mount = None
-        if mount is None:
-            return
+    def _release_camera(self, cam) -> None:
+        """释放一台相机。必须先让采集线程停手再 close()。
+
+        cv2.VideoCapture / QHY 句柄都**不是线程安全**的：采集线程可能正卡在
+        cam.grab() 里（native 调用释放了 GIL），这时候另一个线程 release()
+        同一个句柄，轻则句柄泄漏、重则驱动层把设备一直占着不放 ——
+        表现就是「关掉视频源之后，换哪个源都打不开了」。
+        置暂停标志后等一个取帧周期，让在途的那次 grab 先落地。
+        """
+        self._pause_capture = True
         try:
-            mount.stop()
-        except Exception:
-            logger.exception("断开前停转基座失败")
-        try:
-            mount.close()
-        except Exception:
-            logger.exception("关闭基座连接失败")
+            time.sleep(0.25)
+            if cam is not None:
+                try:
+                    cam.close()
+                except Exception:
+                    logger.exception("关闭相机失败")
+        finally:
+            self._pause_capture = False
 
     def open_camera(self, source: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         ccfg = dict(self._cfg.get("camera", {}) or {})
@@ -388,6 +493,19 @@ class TrackingSession:
         if mount is not None:
             # 仿真相机用它形成真闭环：画面随基座指向变化
             get_pointing = mount.get_altaz
+
+        # 换源前先把旧相机彻底放掉。留着它去开新设备，USB 带宽/独占句柄
+        # 都可能让新设备打不开，而错误信息只会说「打开失败」。
+        with self._lock:
+            old = self._camera
+            self._camera = None
+        if old is not None:
+            self._release_camera(old)
+            with self._frame_lock:
+                self._last_frame = None
+                self._last_result = None
+                self._last_result_ts = None
+
         try:
             from core.camera import build_camera  # 懒加载：模块并行开发
             cam = build_camera(ccfg, get_pointing=get_pointing)
@@ -398,39 +516,12 @@ class TrackingSession:
                     "message": "相机打开失败：%s。请检查设备号/连接线，"
                                "或先用设备列表确认相机存在。" % exc}
         with self._lock:
-            old = self._camera
             self._camera = cam
-        if old is not None:
-            try:
-                old.close()
-            except Exception:
-                logger.exception("关闭旧相机失败")
         try:
             info = dict(cam.info())
         except Exception:
             info = {}
         return {"ok": True, "message": "相机已打开。", "info": info}
-
-    def close_camera(self) -> None:
-        with self._lock:
-            if self._state in ("tracking", "lost"):
-                self.stop_tracking()
-            # 没有画面就没有目标：一并清掉选择状态，避免悬空的 tracker
-            self._tracker = None
-            if self._state != "error":
-                self._state = "idle"
-                self._message = "相机已关闭。"
-            cam = self._camera
-            self._camera = None
-        with self._frame_lock:
-            self._last_frame = None
-            self._last_result = None
-        if cam is None:
-            return
-        try:
-            cam.close()
-        except Exception:
-            logger.exception("关闭相机失败")
 
     # ---------------- 流程 ----------------
 
@@ -605,6 +696,8 @@ class TrackingSession:
                                    "可能把目标越修越远。请先点击「标定」（约半分钟）。"}
             self._pid_az.reset()
             self._pid_alt.reset()
+            self._in_hold = False
+            self._diverge_t0 = None
             self._state = "tracking"
             self._message = "跟踪中。"
         return {"ok": True, "message": "开始跟踪。"}
@@ -670,12 +763,15 @@ class TrackingSession:
         with self._lock:
             cam = self._camera
             self._camera = None
+        # 旧画面必须一并清掉：留着它，视频流会一直播最后一帧，
+        # 用户以为相机还开着；更糟的是框选会拿这张过期图去建跟踪器。
+        with self._frame_lock:
+            self._last_frame = None
+            self._last_result = None
+            self._last_result_ts = None
         if cam is None:
             return {"ok": True, "message": "画面源本来就没打开。"}
-        try:
-            cam.close()
-        except Exception:
-            logger.exception("关闭相机失败")
+        self._release_camera(cam)
         return {"ok": True, "message": "画面源已关闭，相机已释放。"}
 
     def shutdown(self) -> None:
@@ -824,13 +920,30 @@ class TrackingSession:
 
         # ---- 死区：残差已小于抖动量级，下发 0 速率防止基座来回蠕动 ----
         if err_px < self._deadband_px:
+            self._enter_hold()
             self._rate_az = 0.0
             self._rate_alt = 0.0
+            self._ff_az = 0.0
+            self._ff_alt = 0.0
             try:
                 mount.set_rate(0.0, 0.0)
             except Exception:
                 logger.exception("死区内下发零速率失败")
             return
+
+        # ---- 锁定保持带：目标已经在准星环里，就算追到了，别再推 ----
+        # 以前只有 2 像素的死区，环里的目标照样被往正中间怼：
+        # LCM90 有齿隙、跟踪器质心有 ±1 像素抖动，结果就是基座永远在
+        # 小幅来回蹭 —— 用户看到的「都套住了怎么还在转」。
+        # 进环就停推（只保留维持目标角速度的前馈），出环（迟滞 1.6 倍）
+        # 才重新闭环，避免在边界上反复切换。
+        if self._in_hold:
+            if err_px > self._hold_radius_px * _HOLD_EXIT_RATIO:
+                self._in_hold = False
+                logger.debug("目标出锁定环（%.1f px），恢复闭环修正", err_px)
+        elif err_px <= self._hold_radius_px:
+            self._enter_hold()
+            logger.debug("目标进入锁定环（%.1f px），基座停止推近", err_px)
 
         alt = self._get_alt()
         # 误差与前馈都取负号：像素误差是「目标偏离中心多少」，
@@ -848,14 +961,36 @@ class TrackingSession:
         # 正确的估计：绝对速度 = 当前指令速率 + 像素速度折算，
         # 再一阶低通压住测量噪声（vx/vy 本身有质心抖动的高频分量）。
         dv_az, dv_alt = cal.pixels_to_angles(-vx, -vy, alt)
-        raw_ff_az = self._rate_az + dv_az
-        raw_ff_alt = self._rate_alt + dv_alt
-        a = 0.25
-        self._ff_az += a * (raw_ff_az - self._ff_az)
-        self._ff_alt += a * (raw_ff_alt - self._ff_alt)
+        if self._in_hold and time.monotonic() - self._hold_t0 < _HOLD_SETTLE_S:
+            # 刚进环：先老老实实停住，等基座停稳、像素速度里的基座分量散掉，
+            # 再开始估目标自身的速度。这段时间里前馈恒为 0。
+            self._ff_az = 0.0
+            self._ff_alt = 0.0
+        else:
+            raw_ff_az = self._rate_az + dv_az
+            raw_ff_alt = self._rate_alt + dv_alt
+            a = 0.25
+            self._ff_az += a * (raw_ff_az - self._ff_az)
+            self._ff_alt += a * (raw_ff_alt - self._ff_alt)
 
-        rate_az = self._pid_az.update(e_az, dt, feedforward=self._ff_az)
-        rate_alt = self._pid_alt.update(e_alt, dt, feedforward=self._ff_alt)
+        if self._in_hold:
+            # 保持带内：只跟住目标当前的角速度，不再产生指向中心的修正量。
+            # 静止目标 → 前馈自然收敛到 0 → 基座真的停住；
+            # 运动目标（飞机）→ 前馈维持转速，目标不会慢慢飘出环。
+            self._pid_az.reset()
+            self._pid_alt.reset()
+            rate_az, rate_alt = self._ff_az, self._ff_alt
+            floor = float(getattr(mount, "min_rate_deg_s", 2.0 / 3600.0))
+            # 低于驱动死区的速率只会让电机在齿隙里蹭，直接归零
+            if abs(rate_az) < floor:
+                rate_az = 0.0
+            if abs(rate_alt) < floor:
+                rate_alt = 0.0
+        else:
+            rate_az = self._pid_az.update(e_az, dt, feedforward=self._ff_az)
+            rate_alt = self._pid_alt.update(e_alt, dt, feedforward=self._ff_alt)
+            if self._check_diverging(err_px):
+                return
 
         try:
             mount.set_rate(rate_az, rate_alt)
@@ -1255,6 +1390,67 @@ if __name__ == "__main__":
     tracker.result = _mkres("tracking", (W / 2 + 5.0, H / 2 + 5.0))
     time.sleep(0.2)
     assert session.status()["locked"], "误差在锁定环内应报告 locked"
+
+    # ---- 锁定保持：静止目标进环后基座必须真的停住 ----
+    # 这是「都套住了怎么还在转」那条反馈对应的回归：先在环外把基座推起来，
+    # 再把目标放到环内（15px < lock_radius 30），速率应当归零并保持。
+    tracker.result = _mkres("tracking", (W / 2 + 200.0, H / 2 + 150.0))
+    time.sleep(0.3)
+    assert mount.last_rate != (0.0, 0.0), "环外应有非零速率（前置条件）"
+    tracker.result = _mkres("tracking", (W / 2 + 12.0, H / 2 + 9.0))  # 15px
+    time.sleep(0.5)
+    mount.rates = []
+    time.sleep(0.4)
+    assert mount.rates, "保持带内仍应按周期下发速率（值为 0）"
+    assert all(r == (0.0, 0.0) for r in mount.rates), \
+        "静止目标在锁定环内时基座必须停住，实际下发了 %s" % (set(mount.rates),)
+    assert session.status()["locked"], "保持带内应报告 locked"
+    log.info("锁定保持验证通过：环内 %d 拍全部下发 0 速率", len(mount.rates))
+
+    # ---- 迟滞：环内小幅抖动不该把基座重新踢起来 ----
+    tracker.result = _mkres("tracking", (W / 2 + 28.0, H / 2))
+    time.sleep(0.3)
+    mount.rates = []
+    time.sleep(0.3)
+    assert all(r == (0.0, 0.0) for r in mount.rates), \
+        "环内 28px 仍属保持带，不应重新推近：%s" % (set(mount.rates),)
+    # 超过迟滞阈值（30 × 1.6 = 48px）才恢复闭环
+    tracker.result = _mkres("tracking", (W / 2 + 80.0, H / 2))
+    time.sleep(0.4)
+    assert mount.last_rate != (0.0, 0.0), "误差超出迟滞阈值应恢复闭环修正"
+    log.info("迟滞验证通过：28px 保持、80px 恢复闭环")
+
+    # ---- 反向标定：误差持续变大时必须停车并说明原因 ----
+    session.stop_tracking()
+    # 把标定矩阵的符号整体取反，模拟「标定方向反了」
+    session._calibration = Calibration(
+        a11=-c, a12=0.0, a21=0.0, a22=-c, arcsec_per_px=6.0,
+        angle_deg=180.0, flipped=False, rms_px=0.3, ok=True)
+    grew = 60.0
+    tracker.result = _mkres("tracking", (W / 2 + grew, H / 2))
+    assert session.start_tracking()["ok"]
+    # 误差随时间不断变大 —— 反向闭环的真实表现。
+    # vx 必须跟着一起给：前馈估的就是「像素速度 + 当前速率」，
+    # 只挪中心不给速度，前馈会自激到限幅，测的就不是本来要测的东西了。
+    t_end = time.monotonic() + 8.0
+    while time.monotonic() < t_end and session.status()["state"] == "tracking":
+        nxt = grew * 1.03
+        tracker.result = _mkres("tracking", (W / 2 + nxt, H / 2),
+                                vx=(nxt - grew) / 0.1)
+        grew = nxt
+        time.sleep(0.1)
+    st = session.status()
+    assert st["state"] != "tracking", "误差持续增大时必须停止跟踪"
+    assert mount.last_rate == (0.0, 0.0), "判定发散后基座必须停转"
+    assert "反" in st["message"], "提示里要点明方向反了，实际：%s" % st["message"]
+    log.info("反向标定识别通过：%s", st["message"])
+
+    # 恢复正确标定，继续后面的用例
+    session._calibration = Calibration(
+        a11=c, a12=0.0, a21=0.0, a22=c, arcsec_per_px=6.0,
+        angle_deg=0.0, flipped=False, rms_px=0.3, ok=True)
+    tracker.result = _mkres("tracking", (W / 2 + 10.0, H / 2))
+    assert session.start_tracking()["ok"]
 
     # ---- 丢失：速率必须立即清零 ----
     tracker.result = _mkres("tracking", (W / 2 + 120.0, H / 2 + 80.0))

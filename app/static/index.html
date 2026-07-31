@@ -483,11 +483,15 @@ $("b-mount-off").onclick=async()=>{
   catch(err){ say("断开失败："+err.message,true); }
 };
 $("b-cam-off").onclick=async()=>{
+  const btn=$("b-cam-off"); btn.disabled=true;
   try{
     const d=await act("/api/camera/close");
     haveFeed=false; $("feed").removeAttribute("src");
+    $("vphint").innerHTML="先在右侧开启视频源";
     say(d.message||"画面源已关闭。");
   }catch(err){ say("关闭失败："+err.message,true); }
+  // finally 不能省：不还原 disabled 的话，按钮再显示出来也点不动
+  finally{ btn.disabled=false; }
 };
 $("b-cam").onclick=async()=>{
   const v=$("sel-cam").value;
@@ -500,6 +504,9 @@ $("b-cam").onclick=async()=>{
     $("vphint").innerHTML="在画面里<b>拖一个框</b>选中要跟的目标";
     say("视频源已开启。");
   }catch(err){ say("相机打开失败："+err.message+"。检查是不是被别的程序占用了。",true); }
+  // 同上：以前少了这一句，关闭视频源后「开启」按钮永远是禁用的，
+  // 表现就是「断开后换一个源怎么点都没反应」
+  finally{ btn.disabled=false; }
 };
 
 $("b-calib").onclick=()=>act("/api/calibrate").catch(e=>say(e.message,true));

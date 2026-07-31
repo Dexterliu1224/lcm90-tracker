@@ -43,8 +43,12 @@ tracker:
 control:
   loop_hz: 15
   pid: {kp: 0.9, ki: 0.06, kd: 0.05, i_limit: 0.5, i_band: 0.4}
-  lock_radius_px: 30
-  deadband_px: 2             # 残差小于此值不动基座，防抖
+  lock_radius_px: 30         # 画面上那个绿色准星环的半径
+  # 目标进到这个半径内就算「追到了」：基座不再往中心推，只保持目标的角速度。
+  # 留空/不填则跟随 lock_radius_px —— 绿圈亮起和基座停下必须是同一件事。
+  # 想跟得更紧就调小（代价是基座会更频繁地小幅修正）。
+  hold_radius_px: 30
+  deadband_px: 2             # 残差小于此值连前馈都不发，彻底停住
 
 calibration:
   step_deg: 0.30             # 标定时每步走多少度

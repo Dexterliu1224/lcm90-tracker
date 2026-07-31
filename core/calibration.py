@@ -47,6 +47,27 @@ _STEP_MIN_DEG = 0.005          # 步长下限，再小基座的齿隙就淹没�
 _STEP_RETRIES = 2              # 单步丢目标时自动退回、减半重试的次数
 _EDGE_MARGIN_FRAC = 0.08       # 开标前目标离边缘至少要有短边的 8%
 
+# ---- 质量闸 --------------------------------------------------------------
+# 重投影残差占单步位移的比例。超过它说明四步测到的位移互相对不上 ——
+# 最常见的原因是标定时框了**自己在动**的目标（飞机、云），它的自漂移
+# 混进了「基座造成的位移」里。这种矩阵的转角和符号都不可信，尤其在相机
+# 接近 180° 安装时，一点污染就足以把某一轴的方向解反：跟踪一开就把目标
+# 往画面外推，而界面上看一切正常。宁可判失败让用户重标，也不能存下去。
+# 阈值定在 6%：干净的标定残差只有零点几个百分点（自检里是 0.07%），
+# 而现场那份把方向解反的存档是 28px / 201px ≈ 14%。齿隙和质心抖动
+# 撑死到 2~3%，6% 足够宽松，又能把被污染的结果全部拦下。
+_MAX_RMS_FRAC = 0.06
+# 目标自漂移占单步位移的比例上限。超过它，扣漂移这件事本身就已经在
+# 「猜」了，解出来的矩阵不配被信任。
+_MAX_DRIFT_FRAC = 0.35
+
+
+#: 标定存档的格式版本。质量闸（_MAX_RMS_FRAC / _MAX_DRIFT_FRAC）是在
+#: 版本 2 才加上的 —— 版本 1 的存档可能是一份方向解反的矩阵，而且它一
+#: 落盘就会在每次启动时自动恢复、界面显示「已标定」，用户永远不会想到
+#: 是它的问题。所以旧存档一律不予恢复，宁可让用户重标一次。
+CAL_VERSION = 2
+
 
 @dataclass
 class Calibration:
@@ -62,6 +83,7 @@ class Calibration:
     rms_px: float
     ok: bool
     note: str = ""
+    ver: int = CAL_VERSION
 
     def pixels_to_angles(self, dx: float, dy: float,
                          alt_deg: float) -> Tuple[float, float]:
@@ -92,6 +114,8 @@ class Calibration:
             rms_px=float(d.get("rms_px", 0.0)),
             ok=bool(d.get("ok", False)),
             note=str(d.get("note", "")),
+            # 缺字段 = 质量闸之前写的存档，按版本 1 处理（不予恢复）
+            ver=int(d.get("ver", 1)),
         )
 
 
@@ -306,6 +330,8 @@ class Calibrator:
                          "请确认已框选目标、画面清晰后重试。")
         c_prev, t_prev, v_prev = m
         drift_note = ""
+        drift_frac = 0.0        # 最坏的一步里，目标自漂移占实测位移的比例
+        drift_worst_px = 0.0
 
         # 目标贴着画面边缘时，任何方向的步进都可能把它顶出去，
         # 且这时算出来的安全步长会小到没有信噪比 —— 不如直接说清楚。
@@ -423,8 +449,11 @@ class Calibrator:
             drift = 0.5 * (v_prev + v_new) * dt_step
             d_px = (c_new - c_prev) - drift
             drift_mag = float(np.hypot(drift[0], drift[1]))
-            if drift_mag > 0.5 * float(np.hypot(d_px[0], d_px[1])):
-                # 漂移比信号还大一半以上：结果仍然给，但要让用户知道
+            step_mag = float(np.hypot(d_px[0], d_px[1]))
+            if step_mag > 1e-9:
+                drift_frac = max(drift_frac, drift_mag / step_mag)
+                drift_worst_px = max(drift_worst_px, drift_mag)
+            if drift_mag > 0.5 * step_mag:
                 drift_note = ("；注意：目标自身移动较快（漂移 %.0f 像素/步），"
                               "标定精度受影响，建议尽量在目标较慢时标定" % drift_mag)
             t_prev, v_prev = t_new, v_new
@@ -492,6 +521,28 @@ class Calibrator:
         px_pred = Q @ A_inv.T
         res = P - px_pred
         rms_px = float(math.sqrt(float(np.mean(np.sum(res * res, axis=1)))))
+
+        # ---- 质量闸：不可信的矩阵一律判失败，绝不落盘 ----
+        # 这道闸是「方向反了」的最后一道防线。存一份坏矩阵的代价极高：
+        # 界面显示「已标定」，重启还会自动恢复，用户根本不会想到去重标。
+        mean_step_px = float(np.mean(np.hypot(P[:, 0], P[:, 1])))
+        if mean_step_px > 1e-9 and rms_px > _MAX_RMS_FRAC * mean_step_px:
+            return _fail(
+                "标定结果不自洽：四步的重投影残差 %.0f 像素，已达单步位移 "
+                "%.0f 像素的 %.0f%%（允许上限 %.0f%%）。这种矩阵的方向可能是反的，"
+                "跟踪会把目标越推越远，所以不予采用。"
+                "最常见的原因是标定时框了「自己在动」的目标（飞机、云、车）——"
+                "请改框静止参照物（远处建筑物的角、亮星）后重标。"
+                % (rms_px, mean_step_px, 100.0 * rms_px / mean_step_px,
+                   100.0 * _MAX_RMS_FRAC))
+        if drift_frac > _MAX_DRIFT_FRAC:
+            return _fail(
+                "标定期间目标自己移动了太多（每步漂移约 %.0f 像素，占实测位移的 "
+                "%.0f%%）：这时软件分不清「基座转的」和「目标自己飞的」，"
+                "解出来的方向可能整个反过来。请对着「静止」的参照物"
+                "（远处建筑物的角、亮星）重新标定；标定只需做一次，"
+                "做完再框飞机跟踪不用重标。"
+                % (drift_worst_px, 100.0 * drift_frac))
 
         note = ""
         if svals.min() > 0 and float(svals.max() / svals.min()) > 1.3:
@@ -673,6 +724,41 @@ if __name__ == "__main__":
                       step_deg=0.30, settle_s=0.0, samples=3).run()
     assert (not edge.ok) and "边缘" in edge.note, \
         "目标贴边应提前拒绝并说明原因，实际 note=%s" % edge.note
+
+    # ---- 质量闸：标定时框了会动的目标，必须判失败而不是存下坏矩阵 ----
+    # 这正是现场那份 rms=28px、note 里写着「漂移 137 像素/步」的存档的来历：
+    # 它被当成合格结果保存了，之后每次启动都自动恢复，界面显示「已标定」，
+    # 而跟踪一开方向就是反的。
+    class _DriftingTracker(_FakeTracker):
+        """目标自己以恒定速度飞，且跟踪器报不出速度（vx/vy 缺省 0），
+        于是漂移补偿失效 —— 现场最常见的一种污染。"""
+
+        def __init__(self, mount):
+            _FakeTracker.__init__(self, mount)
+            self.t0 = time.monotonic()
+
+        def update(self, image):
+            # 来回摆而不是一路飞：目标始终留在画面里（否则会先撞上
+            # 「目标被推出视场」那条路径），但每一步测到的位移都被污染。
+            phase = 2.0 * math.pi * (time.monotonic() - self.t0) / 0.7
+            c = (self.c0 + A_true_inv @ self.mount.sky
+                 + np.array([110.0, 60.0]) * math.sin(phase)
+                 + rng.normal(0.0, 0.5, 2))
+            return types.SimpleNamespace(ok=True,
+                                         center=(float(c[0]), float(c[1])))
+
+    mount6 = _FakeMount()
+    dirty = Calibrator(mount6, _FakeCamera(), _DriftingTracker(mount6),
+                       step_deg=0.30, settle_s=0.3, samples=3).run()
+    assert not dirty.ok, "被目标自身运动污染的标定必须判失败，实际却成功了"
+    assert "静止" in dirty.note, "失败原因要告诉用户去框静止参照物：%s" % dirty.note
+    log.info("质量闸生效：%s", dirty.note)
+
+    # ---- 存档版本：新结果带 ver，旧存档缺字段时按 ver=1 处理 ----
+    assert result.ver == CAL_VERSION, "新标定结果应带上当前存档版本"
+    legacy = Calibration.from_dict({k: v for k, v in result.to_dict().items()
+                                    if k != "ver"})
+    assert legacy.ver == 1, "缺 ver 字段的旧存档应被识别为版本 1"
 
     log.info("标定自检全部通过：A 最大元素误差 %.2f%%，角度 %.2f°，"
              "尺度 %.3f\"/px，flipped=%s，rms=%.2fpx",
