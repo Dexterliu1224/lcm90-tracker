@@ -17,6 +17,7 @@ import ctypes
 import logging
 import os
 import platform
+import sys
 import time
 from ctypes import POINTER, byref, c_char_p, c_double, c_int, c_uint8, c_uint32, c_void_p
 from typing import Any, Dict, List, Optional, Tuple
@@ -73,6 +74,25 @@ def _library_candidates() -> List[str]:
     return found
 
 
+def _explicit_library_path() -> Optional[str]:
+    """从 config.yaml 的 camera.qhy.sdk_path 读取显式指定的 SDK 路径。
+
+    自动搜索只覆盖 Program Files 下两层；装到别的盘、或用绿色版解压的
+    情况仍会找不到，这时用户在配置里写死一行即可，不必改代码。
+    """
+    try:
+        import yaml
+        root = (os.path.dirname(os.path.abspath(sys.executable))
+                if getattr(sys, "frozen", False)
+                else os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        with open(os.path.join(root, "config.yaml"), "r", encoding="utf-8") as fh:
+            cfg = yaml.safe_load(fh) or {}
+        p = ((cfg.get("camera", {}) or {}).get("qhy", {}) or {}).get("sdk_path")
+        return str(p).strip() or None if p else None
+    except Exception:
+        return None
+
+
 _sdk_cache: Optional[Any] = None
 _sdk_error: Optional[str] = None
 
@@ -85,7 +105,10 @@ def _load_sdk():
     if _sdk_error is not None:
         return None, _sdk_error
 
-    path = os.environ.get("QHYCCD_LIBRARY")
+    # 优先级：显式配置 > 环境变量 > 自动搜索。
+    # 自动搜索覆盖不到的装机方式（装到 D 盘、绿色版等）靠前两者兜底。
+    explicit = _explicit_library_path()
+    path = explicit or os.environ.get("QHYCCD_LIBRARY")
     candidates = [path] if path else _library_candidates()
     sdk = None
     last_exc: Optional[Exception] = None

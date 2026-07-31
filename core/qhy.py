@@ -39,13 +39,38 @@ QHYCCD_SUCCESS = 0
 
 
 def _library_candidates() -> List[str]:
+    """按优先级列出可能的 SDK 库路径。
+
+    Windows 上不能只按名字找：AllInOne 装完后 qhyccd.dll 未必进
+    System32 —— 用户实测装完后系统目录里根本没有，DLL 散落在
+    「C:\\Program Files\\<各种中文/英文目录>\\qhyccd.dll」。
+    所以这里补一遍常见安装位置的扫描，用户不用手动拷贝。
+    """
     system = platform.system()
-    if system == "Windows":
-        # AllInOne 装完后 DLL 在系统目录里，直接按名字找即可
-        return ["qhyccd.dll"]
     if system == "Darwin":
         return ["/usr/local/lib/libqhyccd.dylib", "libqhyccd.dylib"]
-    return ["/usr/local/lib/libqhyccd.so", "libqhyccd.so.6", "libqhyccd.so"]
+    if system != "Windows":
+        return ["/usr/local/lib/libqhyccd.so", "libqhyccd.so.6", "libqhyccd.so"]
+
+    import glob
+    found: List[str] = ["qhyccd.dll"]          # 先试系统搜索路径
+    roots = [os.environ.get("ProgramFiles", r"C:\Program Files"),
+             os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")]
+    seen = set()
+    for root in roots:
+        if not root:
+            continue
+        # 装机目录名各式各样（QHYCCD / 态势感知 / SharpCap …），
+        # 所以搜两层通配而不是写死目录名
+        for pattern in ("*/qhyccd.dll", "*/*/qhyccd.dll"):
+            for path in glob.glob(os.path.join(root, pattern)):
+                key = path.lower()
+                if key in seen:
+                    continue
+                seen.add(key)
+                # QHY 自家目录优先于第三方软件自带的副本（版本更匹配）
+                found.insert(1 if "qhy" in key else len(found), path)
+    return found
 
 
 _sdk_cache: Optional[Any] = None
@@ -73,7 +98,8 @@ def _load_sdk():
     if sdk is None:
         _sdk_error = ("找不到 QHY 官方驱动（qhyccd.dll）。请先安装 QHY 的 "
                       "AllInOne 驱动包：https://www.qhyccd.com/download/ ，"
-                      "装完重启本程序。（%s）" % last_exc)
+                      "装完重启本程序。已尝试路径：%s（最后错误：%s）"
+                      % (candidates, last_exc))
         return None, _sdk_error
 
     try:
