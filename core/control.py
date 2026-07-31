@@ -322,8 +322,15 @@ class TrackingSession:
                 return {"ok": True, "message": "基座已经连接。",
                         "info": self._safe_mount_info()}
         mcfg = dict(self._cfg.get("mount", {}) or {})
+        # 界面的选择是权威，必须覆盖 config 里的 driver ——
+        # 否则 config 默认 simulator 时，用户选了真串口点连接，
+        # 建出来的还是仿真基座：界面显示"已连接"、遥测在动，
+        # 真望远镜纹丝不动，且没有任何报错。
         if port:
             mcfg["port"] = port
+            mcfg["driver"] = "nexstar"
+        else:
+            mcfg["driver"] = "simulator"
         try:
             from core.mount import build_mount  # 懒加载：模块并行开发
             mount = build_mount(mcfg)

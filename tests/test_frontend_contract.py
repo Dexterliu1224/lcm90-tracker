@@ -39,3 +39,12 @@ def test_post_routes_are_never_called_without_body():
 def test_act_helper_exists():
     src = (ROOT / "app" / "static" / "index.html").read_text(encoding="utf-8")
     assert "const act=" in src, "act() 封装被删了？动作接口会退化成 GET"
+
+
+def test_ui_port_choice_overrides_config_driver():
+    """界面选了真串口，就必须建 nexstar 驱动 —— config 默认 simulator 时
+    曾出现"连接成功但连的是仿真基座"：遥测在动、真望远镜不动、无报错。"""
+    from core.control import TrackingSession
+    s = TrackingSession({"mount": {"driver": "simulator"}})
+    r = s.connect_mount("/dev/tty.definitely-not-a-real-port")
+    assert r["ok"] is False, "连不存在的串口必须失败，而不是悄悄退回仿真"
