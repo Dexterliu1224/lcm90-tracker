@@ -273,6 +273,62 @@ def api_delete_user(username: str, request: Request) -> Dict[str, Any]:
     return {"ok": True, "message": "已删除账号「%s」。" % username}
 
 
+# ================================================================ 星点检测
+@app.get("/api/sources")
+def api_sources() -> Dict[str, Any]:
+    """找出画面里的星点，坐标**归一化**返回（前端不用管分辨率）。"""
+    frame = session.latest_frame()
+    if frame is None:
+        return {"ok": False, "message": "现在没有画面。", "sources": []}
+
+    from core.stars import best_calibration_star, detect_sources, focus_metric
+
+    h, w = frame.shape[:2]
+    found = detect_sources(frame)
+    # 标定一步大约把目标推动画面短边的 12%（见 calibration._STEP_FRAC_OF_FRAME），
+    # 选星时要按这个尺度判断「离边缘够不够远」
+    step_px = 0.12 * min(h, w)
+    best = best_calibration_star(found, (h, w), step_px=step_px)
+
+    def _pack(s, is_best: bool) -> Dict[str, Any]:
+        return {"x": s.x / w, "y": s.y / h,
+                "r": max(6.0, s.fwhm * 2.0) / w,   # 画圈半径，按短边归一化
+                "flux": round(s.flux, 1), "peak": round(s.peak, 1),
+                "fwhm": round(s.fwhm, 2), "saturated": s.saturated,
+                "score": round(s.score, 3), "best": is_best}
+
+    return {"ok": True, "count": len(found),
+            # 画面宽高给前端做 SVG 的 viewBox —— 用正方形 viewBox 配
+            # preserveAspectRatio="none" 会把圆圈拉成椭圆
+            "w": w, "h": h,
+            "sources": [_pack(s, best is not None and s is best) for s in found],
+            "focus_fwhm": focus_metric(found),
+            "best_hint": None if best else
+                         "这一帧里没有适合标定的星（可能都过曝、挤在一起或太靠边）。"}
+
+
+class StarSelectReq(BaseModel):
+    x: float          # 归一化 0..1
+    y: float
+    r: float = 0.0    # 归一化半径，0 表示让后端按默认框大小取
+
+
+@app.post("/api/select/star")
+def api_select_star(req: StarSelectReq) -> Dict[str, Any]:
+    """点选一个星点直接建跟踪框，免去手动拖框。"""
+    frame = session.latest_frame()
+    if frame is None:
+        raise HTTPException(400, "现在没有画面，先开启视频源。")
+    h, w = frame.shape[:2]
+    # 框要比星点本身大一圈：CSRT 需要一点背景才能建立模板，
+    # 框得死贴星点反而锁不住。
+    half = max(14.0, float(req.r) * w * 2.5)
+    bw, bh = 2 * half / w, 2 * half / h
+    x = min(max(req.x - bw / 2, 0.0), 1.0 - bw)
+    y = min(max(req.y - bh / 2, 0.0), 1.0 - bh)
+    return session.select_target((x, y, bw, bh))
+
+
 # ================================================================ 录像
 @app.post("/api/record/start")
 def api_record_start(request: Request) -> Dict[str, Any]:

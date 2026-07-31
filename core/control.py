@@ -588,6 +588,15 @@ class TrackingSession:
             self._last_result = None
         return {"ok": True, "message": self._message, "box_px": px_box}
 
+    def latest_frame(self) -> Optional[np.ndarray]:
+        """最新一帧的**原始**画面副本（不带标注）。
+
+        星点检测必须吃原图：标注画上去的十字丝和文字都是高对比度的亮像素，
+        会被当成光源检出来。
+        """
+        with self._frame_lock:
+            return None if self._last_frame is None else self._last_frame.copy()
+
     def clear_target(self) -> None:
         with self._lock:
             if self._state in ("tracking", "lost"):

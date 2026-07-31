@@ -110,6 +110,22 @@ body{margin:0;background:var(--bg0);color:var(--text);
 .btn.danger:hover{background:rgba(255,95,122,.12)}
 .btnrow{display:flex;gap:9px;flex-wrap:wrap;align-items:center}
 
+/* ── 星点叠加层 ── */
+#stars-ov{position:absolute;inset:0;z-index:3;pointer-events:none;
+  width:100%;height:100%;display:none}
+#stars-ov.show{display:block}
+#stars-ov circle{fill:none;stroke:rgba(120,210,255,.75);stroke-width:1.2;
+  pointer-events:auto;cursor:pointer;transition:.12s}
+#stars-ov circle:hover{stroke:#fff;stroke-width:2;
+  filter:drop-shadow(0 0 4px rgba(120,210,255,.9))}
+#stars-ov circle.best{stroke:#5dff9f;stroke-width:2}
+#stars-ov circle.sat{stroke:rgba(255,170,80,.75);stroke-dasharray:3 3}
+#stars-ov text{fill:#5dff9f;font:600 10px var(--mono);pointer-events:none}
+#starinfo{margin-top:9px;font:11.5px/1.6 var(--mono);color:var(--faint);
+  min-height:1em}
+#starinfo b{color:var(--cy);font-weight:600}
+#starinfo .good{color:#5dff9f}
+
 /* ── 录制按钮 ── */
 .btn.rec{display:inline-flex;align-items:center;gap:8px;
   color:#ff8a9b;border-color:rgba(255,95,122,.38)}
@@ -299,6 +315,7 @@ dialog .dfoot{padding:12px 18px 16px;display:flex;gap:9px;justify-content:flex-e
           <span class="corner tl"></span><span class="corner tr"></span>
           <span class="corner bl"></span><span class="corner br"></span>
           <div id="selbox"></div>
+          <svg id="stars-ov" aria-hidden="true"></svg>
           <div class="vp-hint" id="vphint">先在右侧开启视频源</div>
         </div>
         <div id="msgbar">—</div>
@@ -314,7 +331,9 @@ dialog .dfoot{padding:12px 18px 16px;display:flex;gap:9px;justify-content:flex-e
           <button class="btn rec" id="b-rec" disabled>
             <span class="dot"></span><span id="rec-label">录制</span>
           </button>
+          <button class="btn" id="b-stars" disabled>识别星点</button>
         </div>
+        <div id="starinfo"></div>
         <div id="recinfo"></div>
       </div>
     </div>
@@ -625,6 +644,60 @@ $("b-cam").onclick=async()=>{
   finally{ btn.disabled=false; }
 };
 
+/* ── 星点识别 ─────────────────────────────────────────── */
+let starsOn=false, starTimer=null;
+$("b-stars").onclick=()=>{
+  starsOn=!starsOn;
+  $("b-stars").textContent=starsOn?"关闭星点":"识别星点";
+  $("stars-ov").classList.toggle("show",starsOn);
+  if(starTimer){ clearInterval(starTimer); starTimer=null; }
+  if(starsOn){ refreshStars(); starTimer=setInterval(refreshStars,3000); }
+  else{ $("stars-ov").innerHTML=""; $("starinfo").textContent=""; }
+};
+async function refreshStars(){
+  if(!starsOn) return;
+  let d;
+  try{ d=await api("/api/sources"); }
+  catch(err){ $("starinfo").textContent="识别失败："+err.message; return; }
+  const ov=$("stars-ov");
+  ov.innerHTML="";
+  // viewBox 必须用画面的真实宽高：正方形 viewBox 配 preserveAspectRatio="none"
+  // 会按 16:9 横向拉伸，圆圈全变成椭圆。用真实尺寸后 SVG 与 img 同比例缩放，
+  // 坐标直接用像素，圆还是圆。
+  const W=d.w||1280, H=d.h||720;
+  ov.setAttribute("viewBox","0 0 "+W+" "+H);
+  ov.setAttribute("preserveAspectRatio","none");
+  (d.sources||[]).forEach(s=>{
+    const c=document.createElementNS("http://www.w3.org/2000/svg","circle");
+    c.setAttribute("cx",(s.x*W).toFixed(1));
+    c.setAttribute("cy",(s.y*H).toFixed(1));
+    c.setAttribute("r",Math.max(9,s.r*W).toFixed(1));
+    if(s.best) c.classList.add("best");
+    if(s.saturated) c.classList.add("sat");
+    c.addEventListener("click",()=>pickStar(s));
+    ov.appendChild(c);
+    if(s.best){
+      const t=document.createElementNS("http://www.w3.org/2000/svg","text");
+      t.setAttribute("x",(s.x*W+16).toFixed(1));
+      t.setAttribute("y",(s.y*H-12).toFixed(1));
+      t.textContent="建议用它标定";
+      ov.appendChild(t);
+    }
+  });
+  let msg="找到 <b>"+(d.count||0)+"</b> 个星点";
+  if(d.focus_fwhm!=null)
+    msg+=" · 星点锐度 <b>"+d.focus_fwhm.toFixed(2)+"</b> 像素（转调焦座让它变小＝更准）";
+  if(d.best_hint) msg+=" · "+d.best_hint;
+  else msg+=" · <span class='good'>绿圈那颗最适合标定</span>，点一下即可选中";
+  $("starinfo").innerHTML=msg;
+}
+async function pickStar(s){
+  try{
+    await api("/api/select/star",{x:s.x,y:s.y,r:s.r});
+    say("已选中该星点。"+(s.best?"这颗适合做标定，可以直接点「自动标定」。":""));
+  }catch(err){ say("选中失败："+err.message,true); }
+}
+
 /* ── 录制 ─────────────────────────────────────────────── */
 let recOn=false;
 $("b-rec").onclick=async()=>{
@@ -805,6 +878,8 @@ async function poll(){
     $("b-cam").style.display       = s.camera_opened?"none":"";
     $("b-cam-off").style.display   = s.camera_opened?"":"none";
     renderRec(s.record, s.camera_opened);
+    $("b-stars").disabled=!s.camera_opened;
+    if(!s.camera_opened&&starsOn) $("b-stars").click();   // 关画面就收起叠加层
     if(s.user){
       $("who").textContent=s.user.username+
         (s.user.role==="admin"?" · 管理员":"");
