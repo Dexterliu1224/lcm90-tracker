@@ -137,9 +137,11 @@ jobs:
               throw "status payload has no record section"
             }
 
-            $home = Invoke-WebRequest -Uri http://127.0.0.1:8323/ `
-                                      -WebSession $sess -UseBasicParsing -TimeoutSec 15
-            if ($home.StatusCode -ne 200) { throw "console page returned $($home.StatusCode)" }
+            # NOT $home: that is a read-only PowerShell automatic variable and
+            # assigning to it aborts the script with exit code 1.
+            $console = Invoke-WebRequest -Uri http://127.0.0.1:8323/ `
+                                         -WebSession $sess -UseBasicParsing -TimeoutSec 15
+            if ($console.StatusCode -ne 200) { throw "console page returned $($console.StatusCode)" }
 
             Write-Host "OK: exe starts, login gate closed, admin/admin works, API responds"
           } finally {
