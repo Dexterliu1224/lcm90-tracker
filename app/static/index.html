@@ -142,12 +142,17 @@ body{margin:0;background:var(--bg0);color:var(--text);
   background:rgba(255,95,122,.12)}
 
 /* ── 顶栏用户区 ── */
-.userbox{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
-.userbox .who{font:600 11.5px/1 var(--mono);color:var(--cy);letter-spacing:.05em}
-.lnk{background:none;border:0;padding:0;cursor:pointer;
+.userbox{display:flex;align-items:center;gap:5px;flex-wrap:wrap}
+.userbox .who{font:600 11.5px/1 var(--mono);color:var(--cy);letter-spacing:.05em;
+  margin-right:5px}
+/* padding 不能是 0：这几个是纯文字按钮，点击区域只有字那么大，
+   在高 DPI 的 Windows 上很容易点偏 —— 用户的体感就是「点了没反应」。
+   撑到 ≈28px 高，达到可点击目标的最小尺寸。 */
+.lnk{background:none;border:0;padding:8px 7px;cursor:pointer;
   font:11.5px/1 var(--sans);color:var(--dim);letter-spacing:.05em;
   text-decoration:underline;text-underline-offset:3px;
-  text-decoration-color:rgba(143,166,191,.4);transition:.15s}
+  text-decoration-color:rgba(143,166,191,.4);transition:.15s;border-radius:5px}
+.lnk:active{background:rgba(77,214,255,.12)}   /* 点下去要有反馈 */
 .lnk:hover{color:var(--cy);text-decoration-color:var(--cy)}
 #pwdwarn{display:none;margin:0 0 14px;padding:10px 14px;
   background:rgba(255,190,60,.1);border:1px solid rgba(255,190,60,.4);
@@ -295,7 +300,9 @@ dialog .dfoot{padding:12px 18px 16px;display:flex;gap:9px;justify-content:flex-e
       <span class="who" id="who">—</span>
       <button class="lnk" id="b-pwd">修改密码</button>
       <button class="lnk" id="b-users" style="display:none">账号管理</button>
-      <button class="lnk" id="b-logout">退出</button>
+      <!-- 必须写全「退出登录」：现在是桌面窗口程序，光写「退出」会被
+           理解成关闭软件，点完却只是回到登录页，用户会以为没反应 -->
+      <button class="lnk" id="b-logout">退出登录</button>
     </div>
   </div>
 
@@ -468,6 +475,29 @@ dialog .dfoot{padding:12px 18px 16px;display:flex;gap:9px;justify-content:flex-e
 <script>
 "use strict";
 const $=id=>document.getElementById(id);
+
+/* 离开本页（退出登录 / 会话过期）统一走这里。
+   为什么不能各处直接写 location.href="/login"：
+   退出后 Cookie 立刻失效，500ms 内 poll() 必然拿到 401，api() 又会设一次
+   location.href；而 poll() 把异常吞掉后无条件重排，于是每 500ms 就重设一次
+   同一个 URL。反复设置会不断打断上一次尚未完成的导航，再加上 <img src="/video">
+   那条永不结束的 MJPEG 长连接拖着，导航永远走不完 ——
+   用户看到的就是「点退出没有任何反应，页面停在原地」。
+   所以：只跳一次、先停掉所有定时器、先断开长连接。 */
+let leaving=false;
+// 星点轮询的句柄。声明必须放在 goLogin 之前 —— let 有暂时性死区，
+// 在声明之前访问它连 typeof 都会抛 ReferenceError。
+let starsOn=false, starTimer=null;
+function goLogin(){
+  if(leaving) return;
+  leaving=true;
+  if(starTimer){ clearInterval(starTimer); starTimer=null; }
+  // 断开 MJPEG：它是个不会结束的响应，挂着它导航会被一直拖住
+  const f=$("feed"); if(f) f.removeAttribute("src");
+  // replace 而不是 href：退出之后按「后退」不该再回到已经登出的控制台
+  location.replace("/login");
+}
+
 const api=async(p,body,method)=>{
   const opt = method ? {method:method} : (body?{method:"POST"}:{});
   if(body){ opt.headers={"Content-Type":"application/json"};
@@ -475,7 +505,7 @@ const api=async(p,body,method)=>{
   const r=await fetch(p,opt);
   // 会话过期就整页跳回登录页。不跳的话，界面会静静地一直报 401，
   // 用户看到的是「所有按钮都没反应」，根本猜不到是登录掉了。
-  if(r.status===401){ location.href="/login"; throw new Error("登录已过期"); }
+  if(r.status===401){ goLogin(); throw new Error("登录已过期"); }
   const d=await r.json().catch(()=>({}));
   if(!r.ok) throw new Error(d.detail||("HTTP "+r.status));
   // 后端的「温和失败」是 HTTP 200 + ok:false + 中文原因。
@@ -645,7 +675,7 @@ $("b-cam").onclick=async()=>{
 };
 
 /* ── 星点识别 ─────────────────────────────────────────── */
-let starsOn=false, starTimer=null;
+/* starsOn / starTimer 在文件上方与 goLogin 一起声明 */
 $("b-stars").onclick=()=>{
   starsOn=!starsOn;
   $("b-stars").textContent=starsOn?"关闭星点":"识别星点";
@@ -740,8 +770,9 @@ function renderRec(rec,cameraOpened){
 
 /* ── 账号 ─────────────────────────────────────────────── */
 $("b-logout").onclick=async()=>{
+  // 不用管 poll 会不会同时因为 401 也去跳：goLogin 里的 leaving 保证只跳一次
   try{ await act("/api/logout"); }catch(e){}
-  location.href="/login";
+  goLogin();
 };
 
 function openPwd(){
@@ -920,7 +951,9 @@ async function poll(){
     else if(!hasTarget||s.state==="idle") stepState("calib");
     else stepState("track");
   }catch(e){}
-  setTimeout(poll,500);
+  // 已经在跳转就别再排下一拍了：继续轮询只会不断拿到 401、
+  // 不断重设 location，把正在进行的导航一次次打断。
+  if(!leaving) setTimeout(poll,500);
 }
 scanPorts(); scanCams(); poll();
 </script>
