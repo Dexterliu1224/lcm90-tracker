@@ -34,6 +34,19 @@ _MIN_COS_ALT = 0.05
 # 视场极大），此时最小二乘解全是噪声，必须判失败而不是硬算。
 _MIN_STEP_PX = 1.0
 
+# ---- 步长自适应 ----------------------------------------------------------
+# 固定步长（配置里那个 0.30°）是**盲的**：它不知道一度对应多少像素。
+# 画面是 1280×720 这种宽高比时，横向能容下的位移竖向容不下，于是
+# 「+方位 / −方位」两步过关、走到第一个仰角步就把目标顶出画面上下边缘，
+# 表现就是每次都卡在「第 3 步（+仰角）后目标丢失」。
+# 对策：第 1、2 步测出像元尺度后，后面的步长按画面尺寸反算，
+# 只缩不放（配置值永远是上限，用户调小依然有效）。
+_STEP_FRAC_OF_FRAME = 0.12     # 单步位移目标值：画面**短边**的 12%
+_STEP_FRAC_OF_MARGIN = 0.55    # 且不超过目标到最近边缘距离的 55%
+_STEP_MIN_DEG = 0.005          # 步长下限，再小基座的齿隙就淹没信号了
+_STEP_RETRIES = 2              # 单步丢目标时自动退回、减半重试的次数
+_EDGE_MARGIN_FRAC = 0.08       # 开标前目标离边缘至少要有短边的 8%
+
 
 @dataclass
 class Calibration:
@@ -107,6 +120,9 @@ class Calibrator:
         self.step_deg = float(step_deg)
         self.settle_s = float(settle_s)
         self.samples = max(1, int(samples))
+        # 画面尺寸 (高, 宽)：从实际抓到的帧里取，用于把步长换算成安全位移。
+        # 抓到帧之前是 None，此时步长退回配置值。
+        self._hw: Optional[Tuple[int, int]] = None
 
     # ---------------- 内部工具 ----------------
 
@@ -146,6 +162,7 @@ class Calibrator:
             if frame is None:
                 time.sleep(0.05)
                 continue
+            self._note_frame(frame)
             try:
                 res = self.tracker.update(frame.image)
             except Exception:
@@ -180,6 +197,7 @@ class Calibrator:
             if frame is None:
                 time.sleep(0.02)
                 continue
+            self._note_frame(frame)
             try:
                 self.tracker.update(frame.image)
             except Exception:
@@ -201,6 +219,49 @@ class Calibrator:
         while th.is_alive():
             self._pump_tracker(0.06)
         return bool(out.get("ok", False)), out.get("exc")
+
+    def _note_frame(self, frame: Any) -> None:
+        """记下画面尺寸。标定全程只会是同一路相机，取到一次就够。"""
+        if self._hw is not None:
+            return
+        img = getattr(frame, "image", None)
+        shape = getattr(img, "shape", None)
+        if shape is not None and len(shape) >= 2:
+            self._hw = (int(shape[0]), int(shape[1]))
+
+    def _safe_disp_px(self, center: np.ndarray) -> float:
+        """这一步允许把目标推多远（像素）。
+
+        两条约束取小者：占画面短边的固定比例（保证任何方向都走得回来），
+        以及目标当前到最近边缘距离的一半多一点（目标本来就偏一边时收紧）。
+        """
+        if self._hw is None:
+            return float("inf")
+        h, w = self._hw
+        short = float(min(h, w))
+        margin = float(min(center[0], w - center[0], center[1], h - center[1]))
+        return max(8.0, min(_STEP_FRAC_OF_FRAME * short,
+                            _STEP_FRAC_OF_MARGIN * margin))
+
+    def _choose_step(self, px_per_deg: Optional[float], center: np.ndarray,
+                     alt_now: float, axis_is_alt: bool) -> float:
+        """把「想要的像素位移」换算成这一轴该走的角度。
+
+        px_per_deg 是**天球角距**的像元尺度（前面步骤实测得来）。方位轴
+        要多转 1/cos(alt) 才能在天球上走出同样角距，所以方位步要除回去。
+        没有实测尺度时（第 1 步）只能用配置值。
+        结果永远不超过配置的 step_deg：自适应只负责往小调，
+        用户手工调小 step_deg 仍然完全有效。
+        """
+        if px_per_deg is None or px_per_deg <= 1e-9:
+            return self.step_deg
+        want_px = self._safe_disp_px(center)
+        if not math.isfinite(want_px):
+            return self.step_deg
+        deg = want_px / px_per_deg
+        if not axis_is_alt:
+            deg /= max(_MIN_COS_ALT, math.cos(math.radians(alt_now)))
+        return max(_STEP_MIN_DEG, min(self.step_deg, deg))
 
     def _get_alt(self, default: float = 45.0) -> float:
         try:
@@ -246,57 +307,111 @@ class Calibrator:
         c_prev, t_prev, v_prev = m
         drift_note = ""
 
+        # 目标贴着画面边缘时，任何方向的步进都可能把它顶出去，
+        # 且这时算出来的安全步长会小到没有信噪比 —— 不如直接说清楚。
+        if self._hw is not None:
+            h0, w0 = self._hw
+            margin0 = float(min(c_prev[0], w0 - c_prev[0],
+                                c_prev[1], h0 - c_prev[1]))
+            if margin0 < _EDGE_MARGIN_FRAC * min(h0, w0):
+                return _fail("目标离画面边缘太近（%.0f 像素），标定一动就会把它推出视场。"
+                             "请先手动微调基座，把目标大致移到画面中央再标定。"
+                             % margin0)
+
         # 四步依次是 +az / −az / +alt / −alt：
         # 1) 每个轴正反各走一次，正反样本平均可部分抵消齿隙（backlash）；
-        # 2) 走完四步基座恰好回到起点，目标不会越标越偏。
-        step = self.step_deg
-        plan = [
-            ("+方位", step, 0.0),
-            ("−方位", -step, 0.0),
-            ("+仰角", 0.0, step),
-            ("−仰角", 0.0, -step),
-        ]
+        # 2) 每对的两步大小相同方向相反，走完基座回到起点，目标不会越标越偏。
+        names = ("+方位", "−方位", "+仰角", "−仰角")
+        signs = (1.0, -1.0, 1.0, -1.0)
+        is_alt = (False, False, True, True)
+        # 每对的第一步定步长，第二步照抄（取反），保证成对抵消。
+        pair_step = [self.step_deg, self.step_deg]
 
         px_rows: List[Tuple[float, float]] = []    # (dx, dy)
         ang_rows: List[Tuple[float, float]] = []   # (d_az_sky, d_alt)
         applied_az = 0.0
         applied_alt = 0.0
+        # 天球角距的像元尺度（像素/度），由已走完的步实测得到。
+        # 相机的像元尺度两轴通用，所以方位步测出的值可以直接给仰角步定步长
+        # —— 这正是「方位两步过关、仰角步却把目标顶出画面」的解药。
+        px_per_deg: Optional[float] = None
+        shrink_note = ""
 
-        for i, (name, d_az, d_alt) in enumerate(plan):
+        for i in range(4):
+            name = names[i]
             frac0 = 0.05 + 0.20 * i
-            self._report(progress_cb, "第 %d/4 步：%s %.2f°" %
-                         (i + 1, name, step), frac0)
 
             # 步进前读仰角：alt 步会改变 cos(alt)，逐步读取比只读一次准。
             alt_now = self._get_alt()
 
-            # nudge 在后台跑、前台持续喂帧：跟踪器全程连续看到画面，
-            # 每帧位移只有几个像素，不会因一次性大跳变丢失目标。
-            moved, exc = self._nudge_tracking(d_az, d_alt)
-            if exc is not None:
-                logger.exception("标定第 %d 步 nudge 抛出异常", i + 1)
-                self._restore(applied_az, applied_alt)
-                return _fail("第 %d 步（%s）基座移动出错：%s。"
-                             "请检查基座连接与仰角限位后重试。" % (i + 1, name, exc))
-            if not moved:
-                self._restore(applied_az, applied_alt)
-                return _fail("第 %d 步（%s）基座移动失败（可能超时或触及限位）。"
-                             "请检查基座状态后重试。" % (i + 1, name))
-            applied_az += d_az
-            applied_alt += d_alt
+            if i % 2 == 0:
+                pair_step[i // 2] = self._choose_step(
+                    px_per_deg, c_prev, alt_now, is_alt[i])
+            step_i = pair_step[i // 2]
 
-            # 停稳等待：基座有减速与残振，立刻采样会把机械瞬态当成位移。
-            # 等待期间继续喂帧，跟踪不断线。
-            if self.settle_s > 0:
-                self._pump_tracker(self.settle_s)
+            attempt = 0
+            while True:
+                d_az = 0.0 if is_alt[i] else signs[i] * step_i
+                d_alt = signs[i] * step_i if is_alt[i] else 0.0
+                self._report(progress_cb, "第 %d/4 步：%s %.3f°" %
+                             (i + 1, name, step_i), frac0)
 
-            m = self._measure_center_v()
-            if m is None:
-                self._restore(applied_az, applied_alt)
-                return _fail("第 %d 步（%s）后目标丢失。"
-                             "可能步长过大把目标推出视场，"
-                             "可在配置里调小 calibration.step_deg 后重试。"
-                             % (i + 1, name))
+                # nudge 在后台跑、前台持续喂帧：跟踪器全程连续看到画面，
+                # 每帧位移只有几个像素，不会因一次性大跳变丢失目标。
+                moved, exc = self._nudge_tracking(d_az, d_alt)
+                if exc is not None:
+                    logger.exception("标定第 %d 步 nudge 抛出异常", i + 1)
+                    self._restore(applied_az, applied_alt)
+                    return _fail("第 %d 步（%s）基座移动出错：%s。"
+                                 "请检查基座连接与仰角限位后重试。"
+                                 % (i + 1, name, exc))
+                if not moved:
+                    self._restore(applied_az, applied_alt)
+                    return _fail("第 %d 步（%s）基座移动失败（可能超时或触及限位）。"
+                                 "请检查基座状态后重试。" % (i + 1, name))
+                applied_az += d_az
+                applied_alt += d_alt
+
+                # 停稳等待：基座有减速与残振，立刻采样会把机械瞬态当成位移。
+                # 等待期间继续喂帧，跟踪不断线。
+                if self.settle_s > 0:
+                    self._pump_tracker(self.settle_s)
+
+                m = self._measure_center_v()
+                if m is not None:
+                    break
+
+                # ---- 目标被推出视场/跟丢：退回这一步，减半再来 ----
+                # 直接判失败等于把「换个步长」这件纯机械的事推给用户，
+                # 而软件手里有算它所需的全部信息。
+                attempt += 1
+                if attempt > _STEP_RETRIES:
+                    self._restore(applied_az, applied_alt)
+                    return _fail("第 %d 步（%s）后目标丢失，缩小步长重试 %d 次仍未找回。"
+                                 "常见原因是跟踪本身不稳（目标太暗、对比度低、画面拖影），"
+                                 "请重新框选目标后再标定。" % (i + 1, name, _STEP_RETRIES))
+                back_ok, _back_exc = self._nudge_tracking(-d_az, -d_alt)
+                if back_ok:
+                    applied_az -= d_az
+                    applied_alt -= d_alt
+                step_i = max(_STEP_MIN_DEG, step_i * 0.4)
+                pair_step[i // 2] = step_i
+                self._report(progress_cb,
+                             "第 %d/4 步：目标被推出视场，改用 %.3f° 重试"
+                             % (i + 1, step_i), frac0)
+                shrink_note = ("；标定过程中自动把步长缩到 %.3f°（配置值 %.2f° 对当前"
+                               "视场偏大），如果每次标定都触发，直接把 "
+                               "calibration.step_deg 改成这个值更省时间"
+                               % (step_i, self.step_deg))
+                # 退回后目标未必还在原处，基准要重新测。
+                m0 = self._measure_center_v()
+                if m0 is None:
+                    self._restore(applied_az, applied_alt)
+                    return _fail("第 %d 步（%s）后目标丢失，退回原位也没能重新找到。"
+                                 "请重新框选目标，并把 calibration.step_deg 调小到 "
+                                 "%.3f 左右后重试。" % (i + 1, name, step_i))
+                c_prev, t_prev, v_prev = m0
+
             c_new, t_new, v_new = m
 
             # ---- 漂移补偿：扣掉目标**自己**在这段时间里走过的路 ----
@@ -325,9 +440,20 @@ class Calibrator:
             px_rows.append((float(d_px[0]), float(d_px[1])))
             ang_rows.append((d_az * cos_alt, d_alt))
 
+            # 实测像元尺度，供后面的步定步长。相机的像元尺度两轴通用，
+            # 所以方位步测出来的值对仰角步同样有效。
+            disp_px = float(np.hypot(d_px[0], d_px[1]))
+            sky_deg = abs(d_alt) if is_alt[i] else abs(d_az) * cos_alt
+            if sky_deg > 1e-9:
+                obs = disp_px / sky_deg
+                px_per_deg = obs if px_per_deg is None else 0.5 * (px_per_deg + obs)
+
             c_prev = c_new
             self._report(progress_cb, "第 %d/4 步完成：位移 %.1f 像素" %
-                         (i + 1, float(np.hypot(d_px[0], d_px[1]))), frac0 + 0.18)
+                         (i + 1, disp_px), frac0 + 0.18)
+
+        # 四步成对抵消，理论上已回到起点；中途重试改过步长则会有残留，补回去。
+        self._restore(applied_az, applied_alt)
 
         self._report(progress_cb, "最小二乘求解映射矩阵", 0.90)
 
@@ -374,6 +500,8 @@ class Calibrator:
                     "建议重新标定确认。" % float(svals.max() / svals.min()))
         if drift_note:
             note = (note + drift_note) if note else drift_note.lstrip("；")
+        if shrink_note:
+            note = (note + shrink_note) if note else shrink_note.lstrip("；")
 
         cal = Calibration(
             a11=float(A[0, 0]), a12=float(A[0, 1]),
@@ -433,10 +561,14 @@ if __name__ == "__main__":
             self.sky = self.sky + np.array([d_az * cos_alt, d_alt])
             return True
 
+    # 画面尺寸必须是真实的 1280×720：步长自适应要按它算安全位移，
+    # 假相机给个 4×4 就测不出「宽方向容得下、高方向容不下」这件事。
+    FRAME_W, FRAME_H = 1280, 720
+
     class _FakeCamera:
         def grab(self):
             return types.SimpleNamespace(
-                image=np.zeros((4, 4, 3), dtype=np.uint8),
+                image=np.zeros((FRAME_H, FRAME_W, 3), dtype=np.uint8),
                 ts=time.time(), index=0)
 
     class _FakeTracker:
@@ -504,6 +636,43 @@ if __name__ == "__main__":
                       step_deg=0.30, settle_s=0.0, samples=3).run()
     assert (not bad2.ok) and "移动失败" in bad2.note, \
         "步进失败应返回 ok=False 且 note 说明原因"
+
+    # ---- 回归：步长对竖向视场过大时必须自己缩，而不是死在第 3 步 ----
+    # 复现现场故障：1280×720 的画面，配置步长在方位（宽 1280）方向撑得住，
+    # 到「+仰角」就把目标顶出上下边缘 → 每次都报「第 3 步（+仰角）后目标丢失」。
+    class _ClippingTracker(_FakeTracker):
+        """出画面就判丢失 —— 真跟踪器的行为。"""
+
+        def update(self, image):
+            res = _FakeTracker.update(self, image)
+            if not res.ok:
+                return res
+            x, y = res.center
+            if not (0.0 <= x < FRAME_W and 0.0 <= y < FRAME_H):
+                return types.SimpleNamespace(ok=False, center=None)
+            return res
+
+    mount4 = _FakeMount()
+    # 0.9°/步：横向 ≈ 442 像素（1280 宽扛得住），纵向会冲出 720 的画面。
+    cal4 = Calibrator(mount4, _FakeCamera(), _ClippingTracker(mount4),
+                      step_deg=0.90, settle_s=0.0, samples=3)
+    steps4 = []
+    r4 = cal4.run(progress_cb=lambda m, f: steps4.append(m))
+    assert r4.ok, "步长过大时应自动缩小并标定成功，而不是失败：%s" % r4.note
+    assert abs(r4.arcsec_per_px - 6.0) / 6.0 < 0.05, \
+        "自适应步长下尺度仍应约 6″/px，实际 %.3f" % r4.arcsec_per_px
+    assert any("+仰角" in s for s in steps4), "应当真的走到过仰角步"
+    log.info("步长自适应回归通过：配置 0.90°，实际标定成功，尺度 %.2f\"/px",
+             r4.arcsec_per_px)
+
+    # ---- 边缘保护：目标贴着画面边时直接说清楚，别一动就丢 ----
+    mount5 = _FakeMount()
+    tr5 = _FakeTracker(mount5)
+    tr5.c0 = np.array([8.0, 360.0])          # 紧贴左边缘
+    edge = Calibrator(mount5, _FakeCamera(), tr5,
+                      step_deg=0.30, settle_s=0.0, samples=3).run()
+    assert (not edge.ok) and "边缘" in edge.note, \
+        "目标贴边应提前拒绝并说明原因，实际 note=%s" % edge.note
 
     log.info("标定自检全部通过：A 最大元素误差 %.2f%%，角度 %.2f°，"
              "尺度 %.3f\"/px，flipped=%s，rms=%.2fpx",
