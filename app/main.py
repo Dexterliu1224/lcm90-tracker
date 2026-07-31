@@ -117,6 +117,45 @@ def api_ports() -> Dict[str, Any]:
     return {"ports": ports}
 
 
+@app.get("/api/qhy/diagnose")
+def api_qhy_diagnose() -> Dict[str, Any]:
+    """QHY 排查专用：把 SDK 加载、扫描、每一台的 ID 全暴露出来。
+
+    用户遇到过「EZCAP 能看到相机、本软件列表为空、也没有任何报错」的情况，
+    光看界面无从下手 —— 浏览器打开 /api/qhy/diagnose 就能拿到真实原因。
+    """
+    import glob
+    out: Dict[str, Any] = {}
+    out["dll_found"] = (glob.glob("C:/Windows/System32/qhyccd*")
+                        + glob.glob("C:/Windows/SysWOW64/qhyccd*"))
+    try:
+        from core import qhy
+        sdk, err = qhy._load_sdk()
+        out["sdk_loaded"] = sdk is not None
+        out["sdk_error"] = err
+        if sdk is not None:
+            try:
+                n = int(sdk.ScanQHYCCD())
+                out["scan_count"] = n
+                ids = []
+                import ctypes
+                for i in range(n):
+                    buf = ctypes.create_string_buffer(64)
+                    rc = sdk.GetQHYCCDId(ctypes.c_uint32(i), buf)
+                    ids.append({"index": i, "rc": rc,
+                                "id": buf.value.decode("ascii", "replace")})
+                out["cameras"] = ids
+            except Exception as exc:
+                out["scan_error"] = repr(exc)
+        devices, err2 = qhy.list_qhy_cameras()
+        out["list_result"] = devices
+        out["list_error"] = err2
+    except Exception as exc:
+        import traceback
+        out["exception"] = traceback.format_exc()
+    return out
+
+
 @app.get("/api/cameras")
 def api_cameras() -> Dict[str, Any]:
     devices: List[Dict[str, Any]] = []
