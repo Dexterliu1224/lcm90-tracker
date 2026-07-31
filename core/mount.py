@@ -164,9 +164,17 @@ class MountBase:
 
         target_az = wrap360(az0 + float(d_az))
         want_alt = alt0 + float(d_alt)
-        # 仰角限位保护：夹住后仍然执行（能走多少走多少），
-        # 但最终按「原始目标」判定成败，被夹掉的部分自然导致返回 False。
-        target_alt = clamp(want_alt, self.alt_limit_min_deg, self.alt_limit_max_deg)
+        if abs(float(d_alt)) <= 1e-9:
+            # 纯方位移动：绝不能碰仰角。当前仰角若已在限位之外
+            # （镜筒平放在桌上时 alt≈0，而下限常设 5°），夹一下会凭空
+            # 产生一次仰角运动，且成败按原始请求判定 → 永远失败。
+            # 实测表现：标定第 1 步「+方位」直接报移动失败。
+            target_alt = alt0
+        else:
+            # 仰角限位保护：夹住后仍然执行（能走多少走多少），
+            # 但最终按「原始目标」判定成败，被夹掉的部分自然导致返回 False。
+            target_alt = clamp(want_alt, self.alt_limit_min_deg,
+                               self.alt_limit_max_deg)
         if abs(target_alt - want_alt) > self._nudge_tol_deg:
             logger.warning(
                 "nudge 目标仰角 %.3f° 超出限位 [%.1f, %.1f]，已夹到 %.3f°",
@@ -318,7 +326,7 @@ class NexStarMount(MountBase):
         return self._ser is not None and self._ser.is_open
 
     # ------------------------------------------------------------ 底层收发
-    def _command(self, payload: bytes, expect_bytes: int = 0) -> bytes:
+    def _command_once(self, payload: bytes, expect_bytes: int = 0) -> bytes:
         """发一条指令并读回应答（不含结尾的 '#'）。
 
         expect_bytes 为应答里 '#' 之前的字节数；0 表示读到 '#' 为止。
@@ -346,6 +354,26 @@ class NexStarMount(MountBase):
                     return bytes(buf)
                 buf.extend(ch)
             raise MountError(f"指令 {payload!r} 超时，已收到: {bytes(buf)!r}")
+
+    def _command(self, payload: bytes, expect_bytes: int = 0,
+                 retries: int = 2) -> bytes:
+        """发指令并重试。手控器在电机转动时偶尔会丢一次应答 ——
+        标定期间正好电机在转，单次超时就让整轮标定失败太脆弱。"""
+        last: Optional[Exception] = None
+        for attempt in range(max(1, retries + 1)):
+            try:
+                return self._command_once(payload, expect_bytes)
+            except MountError as exc:
+                last = exc
+                logger.debug("指令 %r 第 %d 次失败：%s", payload, attempt + 1, exc)
+                try:
+                    with self._lock:
+                        if self._ser is not None and self._ser.is_open:
+                            self._ser.reset_input_buffer()
+                except Exception:
+                    pass
+                time.sleep(0.08)
+        raise last if last else MountError(f"指令 {payload!r} 失败")
 
     def _passthrough(self, dev: int, sub: int, d1: int = 0, d2: int = 0,
                      d3: int = 0, resp_len: int = 0) -> bytes:

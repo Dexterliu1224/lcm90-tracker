@@ -98,3 +98,14 @@ def test_reconnect_switches_device():
     r3 = s.connect_mount("/dev/tty.not-exist")
     assert r3["ok"] is False
     assert s._mount is None
+
+
+def test_pure_azimuth_nudge_never_moves_altitude():
+    """纯方位 nudge 不得改动仰角。镜筒平放（alt≈0）而下限是 5° 时，
+    旧代码会把目标仰角夹到 5°，凭空要求抬高 → 标定第 1 步必然失败。"""
+    from core.mount import SimMount
+    m = SimMount(alt_limit_min_deg=5.0, alt_limit_max_deg=88.0)
+    m.connect()
+    m._az, m._alt = 100.0, 0.0        # 平放在桌上，已在下限之外
+    assert m.nudge(0.3, 0.0, timeout_s=10) is True, "纯方位移动应当成功"
+    assert abs(m.get_altaz()[1] - 0.0) < 0.05, "仰角不该被限位拽上去"

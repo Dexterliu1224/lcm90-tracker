@@ -34,7 +34,7 @@ CONTROL_GAIN = 6
 CONTROL_OFFSET = 7
 CONTROL_EXPOSURE = 8          # 单位：微秒
 CONTROL_USBTRAFFIC = 12
-CONTROL_TRANSFERBIT = 14
+CONTROL_TRANSFERBIT = 10       # 官方枚举值；曾误写成 14（那是只读的 CURTEMP）
 STREAM_LIVE = 1
 QHYCCD_SUCCESS = 0
 
@@ -254,7 +254,15 @@ class QHYCamera(CameraBase):
             full_w, full_h = int(iw.value), int(ih.value)
         else:
             full_w, full_h = 0, 0
-        if full_w > 0 and full_h > 0:
+        if full_w <= 0 or full_h <= 0:
+            # 拿不到芯片尺寸就没法设 ROI，而没设 ROI 的 live 流实测是全黑的。
+            # 与其给用户一个"能开但全黑"的相机，不如当场失败并说清原因。
+            self.close()
+            raise RuntimeError(
+                "读取 %s 芯片信息失败，无法确定读出区域。"
+                "请重插相机 USB（建议直插机箱后置口）或重装 QHY 驱动包后重试"
+                % self._model)
+        if True:
             roi_w = max(1, full_w // self._binning)
             roi_h = max(1, full_h // self._binning)
             rc = sdk.SetQHYCCDResolution(self._handle, c_uint32(0), c_uint32(0),
@@ -323,18 +331,26 @@ class QHYCamera(CameraBase):
         img = (raw.reshape((height, width, channels)) if channels > 1
                else raw.reshape((height, width)))
         if dtype == np.uint16:
-            # 16 位降到 8 位：视觉算法只需要 8 位，且要保住暗部细节，
-            # 直接右移 8 位会把弱信号全抹平，所以按实际动态范围拉伸
-            hi = int(img.max())
-            img = ((img.astype(np.float32) / max(hi, 1)) * 255).astype(np.uint8) \
-                if hi > 0 else img.astype(np.uint8)
+            # 16 位降到 8 位。不能拿整幅 max 当分母：QHY 的热像素/饱和星点
+            # 常年顶在 65535，几百 ADU 的真实信号会被压到个位数 → 看着全黑，
+            # 且 max 逐帧变化会让画面亮度不停闪烁（视觉跟踪最忌讳）。
+            # 改用分位数拉伸，对离群值鲁棒。
+            lo = float(np.percentile(img, 0.5))
+            hi = float(np.percentile(img, 99.5))
+            if hi <= lo:
+                hi = lo + 1.0
+            img = np.clip((img.astype(np.float32) - lo) * (255.0 / (hi - lo)),
+                          0, 255).astype(np.uint8)
         self.last_stats = (int(img.min()), int(img.max()), float(img.mean()))
         if channels == 1:
             # 契约要求 BGR：黑白（200M）转三通道，下游不用分情况
             img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
         self._size = (width, height)
         self._frame_index += 1
-        return Frame(image=np.ascontiguousarray(img), ts=time.time(),
+        # 必须真复制：np.frombuffer 是采集缓冲的零拷贝视图，
+        # ascontiguousarray 对已连续数组不复制 —— 下一帧会就地覆写，
+        # 下游还在处理上一帧就会撕裂/错帧。
+        return Frame(image=img.copy(), ts=time.time(),
                      index=self._frame_index)
 
     def info(self) -> Dict[str, Any]:

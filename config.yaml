@@ -7,7 +7,7 @@ mount:
   baudrate: 9600
   max_rate_deg_s: 2.5        # LCM90 机械上限约 3°/s，留余量
   min_rate_arcsec_s: 2.0     # 低于此速率不下发，避免齿隙抖动
-  alt_limit_min_deg: 5.0
+  alt_limit_min_deg: 5.0   # 室内平放镜筒测试时设 -10，否则纯方位标定会被限位挡住
   alt_limit_max_deg: 88.0
 
 camera:
