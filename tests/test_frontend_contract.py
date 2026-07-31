@@ -48,3 +48,23 @@ def test_ui_port_choice_overrides_config_driver():
     s = TrackingSession({"mount": {"driver": "simulator"}})
     r = s.connect_mount("/dev/tty.definitely-not-a-real-port")
     assert r["ok"] is False, "连不存在的串口必须失败，而不是悄悄退回仿真"
+
+
+def test_camera_source_parsing():
+    """界面选择 → 相机驱动的翻译：QHY / 普通摄像头 / 仿真三条路必须分明。"""
+    from app.main import CameraReq, parse_camera_source
+    assert parse_camera_source(CameraReq(sim=True))["driver"] == "simulator"
+    assert parse_camera_source(CameraReq(source=None))["driver"] == "simulator"
+    q = parse_camera_source(CameraReq(source="qhy:1"))
+    assert q == {"driver": "qhy", "index": 1}
+    o = parse_camera_source(CameraReq(source="0"))
+    assert o == {"driver": "opencv", "source": 0}
+
+
+def test_qhy_module_degrades_without_sdk():
+    """没装 QHY SDK 的机器上，扫描必须安静返回空表 + 原因，绝不抛异常。"""
+    from core.qhy import list_qhy_cameras
+    devices, err = list_qhy_cameras()
+    assert isinstance(devices, list)
+    if err is not None:
+        assert "qhyccd" in err or "QHY" in err

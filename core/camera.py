@@ -543,6 +543,15 @@ def build_camera(cfg: Dict[str, Any],
     if driver == "opencv":
         return OpenCVCamera(source=cfg.get("source", 0),
                             width=width, height=height, fps=fps)
+    if driver == "qhy":
+        from core.qhy import QHYCamera   # 懒加载：没装 SDK 的机器不受影响
+        q = dict(cfg.get("qhy", {}) or {})
+        return QHYCamera(index=int(cfg.get("index", 0)),
+                         exposure_ms=float(q.get("exposure_ms", 20)),
+                         gain=float(q.get("gain", 180)),
+                         offset=float(q.get("offset", 10)),
+                         usb_traffic=float(q.get("usb_traffic", 30)),
+                         binning=int(q.get("binning", 1)))
     if driver in ("simulator", "sim"):
         return SimCamera(width=width, height=height, fps=fps,
                          arcsec_per_px=float(cfg.get("arcsec_per_px", 6.0)),
@@ -553,7 +562,7 @@ def build_camera(cfg: Dict[str, Any],
                              cfg.get("target_heading_deg", 40.0)))
     raise ValueError(
         "未知的相机驱动 %r：config.yaml 的 camera.driver 只能填 "
-        "opencv 或 simulator，请修改后重试。" % (driver,))
+        "opencv / qhy / simulator，请修改后重试。" % (driver,))
 
 
 # ---------------------------------------------------------------------------

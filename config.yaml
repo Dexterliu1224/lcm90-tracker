@@ -11,7 +11,14 @@ mount:
   alt_limit_max_deg: 88.0
 
 camera:
-  driver: simulator          # opencv = 真实相机；simulator = 合成演示画面
+  driver: simulator          # opencv = 普通USB摄像头；qhy = QHY相机；simulator = 演示
+  # QHY 相机参数（driver 为 qhy 或界面里选中 QHY 时生效）。
+  # 前提：装过 QHY 官方 AllInOne 驱动包 https://www.qhyccd.com/download/
+  qhy:
+    exposure_ms: 20          # 曝光（毫秒），画面太暗调大，拖影明显调小
+    gain: 180                # 增益，太暗调大、噪点多调小
+    usb_traffic: 30          # 掉帧/花屏时调大（0-60）
+    binning: 1               # 2 = 2x2合并，更亮更快但更粗
   source: 0                  # opencv 设备号或视频地址
   width: 1280
   height: 720

@@ -51,9 +51,24 @@ class ConnectReq(BaseModel):
 
 
 class CameraReq(BaseModel):
-    source: Optional[int] = None
+    # int = 普通摄像头设备号；"qhy:0" = QHY 相机；None + sim = 仿真
+    source: Optional[Any] = None
     sim: bool = False
     preset: str = "eyepiece"
+
+
+def parse_camera_source(req: "CameraReq") -> Dict[str, Any]:
+    """把界面的选择翻译成 build_camera 的配置覆盖。
+
+    界面的选择必须覆盖 config 的 driver —— 相机和基座犯过同一个病：
+    config 默认 simulator 时选真摄像头，建出来的还是仿真画面。
+    """
+    if req.sim or req.source is None:
+        return {"driver": "simulator"}
+    s = str(req.source).strip()
+    if s.lower().startswith("qhy:"):
+        return {"driver": "qhy", "index": int(s.split(":", 1)[1] or 0)}
+    return {"driver": "opencv", "source": int(s) if s.lstrip("-").isdigit() else s}
 
 
 class SelectReq(BaseModel):
@@ -104,7 +119,19 @@ def api_ports() -> Dict[str, Any]:
 
 @app.get("/api/cameras")
 def api_cameras() -> Dict[str, Any]:
-    return {"devices": list_video_devices()}
+    devices: List[Dict[str, Any]] = []
+    hint = ""
+    try:
+        from core.qhy import list_qhy_cameras
+        qhy, err = list_qhy_cameras()
+        devices.extend(qhy)                 # QHY 排最前：这才是目镜相机
+        if err and "找不到" in err:
+            hint = "未检测到 QHY 驱动（要用 QHY 相机需安装 AllInOne 驱动包）"
+    except Exception:
+        log.exception("QHY 扫描异常")
+    for d in list_video_devices():
+        devices.append({"value": str(d["index"]), "name": d["name"]})
+    return {"devices": devices, "hint": hint}
 
 
 @app.post("/api/mount/connect")
@@ -118,9 +145,9 @@ def api_mount_connect(req: ConnectReq) -> Dict[str, Any]:
 @app.post("/api/camera/open")
 def api_camera_open(req: CameraReq) -> Dict[str, Any]:
     try:
-        source = None if req.sim else {"index": req.source}
-        return session.open_camera({"source": source, "preset": req.preset,
-                                    "sim": req.sim})
+        override = parse_camera_source(req)
+        override["preset"] = req.preset
+        return session.open_camera(override)
     except Exception as exc:
         raise HTTPException(400, str(exc))
 

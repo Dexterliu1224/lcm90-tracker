@@ -435,9 +435,11 @@ async function scanCams(){
   try{
     const d=await api("/api/cameras");
     const s=$("sel-cam"); s.innerHTML="";
+    if(d.hint) say(d.hint);
     d.devices.forEach(c=>{
       const o=document.createElement("option");
-      o.value=c.index; o.textContent=`摄像头 ${c.index}（${c.width}×${c.height}）`;
+      o.value=c.value!==undefined?c.value:c.index;
+      o.textContent=c.name||`摄像头 ${c.index}（${c.width}×${c.height}）`;
       s.appendChild(o);
     });
     const sim=document.createElement("option");
@@ -479,7 +481,7 @@ $("b-cam").onclick=async()=>{
   const btn=$("b-cam"); btn.disabled=true;
   say("正在打开画面源 …");
   try{
-    await api("/api/camera/open",{source:v==="__sim__"?null:+v, sim:v==="__sim__", preset});
+    await api("/api/camera/open",{source:v==="__sim__"?null:v, sim:v==="__sim__", preset});
     haveFeed=true;
     $("feed").src="/video?"+Date.now();
     $("vphint").innerHTML="在画面里<b>拖一个框</b>选中要跟的目标";
