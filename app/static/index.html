@@ -341,6 +341,10 @@ const api=async(p,body)=>{
     headers:{"Content-Type":"application/json"},body:JSON.stringify(body)}:{});
   const d=await r.json().catch(()=>({}));
   if(!r.ok) throw new Error(d.detail||("HTTP "+r.status));
+  // 后端的「温和失败」是 HTTP 200 + ok:false + 中文原因。
+  // 不在这里抛出去的话，失败会被各按钮的成功分支当成功处理 ——
+  // 实测表现：连接失败显示"已连接 undefined"，手动微调彻底无反应。
+  if(d && d.ok===false) throw new Error(d.message||"操作失败");
   return d;
 };
 // 动作类接口一律走这个：api() 只在带 body 时才发 POST，
@@ -445,6 +449,8 @@ async function scanCams(){
 
 $("b-mount").onclick=async()=>{
   const v=$("sel-port").value;
+  const btn=$("b-mount"); btn.disabled=true;
+  say("正在连接基座 …（握手最多等 4 秒）");
   try{
     const d=await api("/api/mount/connect",{port:v==="__sim__"?null:v, sim:v==="__sim__"});
     say(`望远镜已连接：<b>${d.driver==="simulator"?"仿真基座":d.port}</b>`+
@@ -452,6 +458,7 @@ $("b-mount").onclick=async()=>{
     $("mountinfo").textContent=
       `固件 ${d.version||"—"} · ${d.aligned?"已校准":"未校准"} · 上限 ${d.max_rate_deg_s}°/s`;
   }catch(err){ showMountHelp(err.message); }
+  finally{ btn.disabled=false; }
 };
 function showMountHelp(reason){
   $("dlg-mount-body").innerHTML=
@@ -469,6 +476,8 @@ $("dlg-mount-retry").onclick=()=>{ $("dlg-mount").close(); $("b-mount").click();
 
 $("b-cam").onclick=async()=>{
   const v=$("sel-cam").value;
+  const btn=$("b-cam"); btn.disabled=true;
+  say("正在打开画面源 …");
   try{
     await api("/api/camera/open",{source:v==="__sim__"?null:+v, sim:v==="__sim__", preset});
     haveFeed=true;

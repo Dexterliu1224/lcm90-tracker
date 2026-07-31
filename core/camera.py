@@ -28,7 +28,17 @@ logger = logging.getLogger(__name__)
 # 契约数据结构
 # ---------------------------------------------------------------------------
 
+def _open_capture(source):
+    """打开视频源。Windows 上强制走 DirectShow：
+    默认的 MSMF 后端枚举/打开 USB 摄像头动辄卡十几秒，
+    某些外接摄像头干脆打不开 —— 用户的体感就是「外部摄像头没法用」。"""
+    if sys.platform == "win32" and isinstance(source, int):
+        return cv2.VideoCapture(source, cv2.CAP_DSHOW)
+    return cv2.VideoCapture(source)
+
+
 @dataclass
+
 class Frame:
     image: np.ndarray        # BGR uint8
     ts: float
@@ -140,7 +150,7 @@ class OpenCVCamera(CameraBase):
         if self._cap is not None:
             return
         with _quiet_opencv_log():
-            cap = cv2.VideoCapture(self._source)
+            cap = _open_capture(self._source)
         if not cap.isOpened():
             cap.release()
             raise RuntimeError(
@@ -499,7 +509,7 @@ def list_video_devices(max_index: int = 6) -> List[Dict[str, Any]]:
             # 双重抑制：OpenCV 日志走自己的通道，AVFoundation 直接写 fd 2，
             # 两条路都要堵上，否则 macOS 上每个空索引都刷一屏错误
             with _quiet_opencv_log(), _quiet_stderr():
-                cap = cv2.VideoCapture(i)
+                cap = _open_capture(i)
                 if not cap.isOpened():
                     continue
                 w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
