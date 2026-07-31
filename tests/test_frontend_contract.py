@@ -68,3 +68,15 @@ def test_qhy_module_degrades_without_sdk():
     assert isinstance(devices, list)
     if err is not None:
         assert "qhyccd" in err or "QHY" in err
+
+
+def test_qhy_scans_common_install_dirs_on_windows(monkeypatch):
+    """Windows 上不能只按 dll 名字找：用户实测 AllInOne 装完后
+    System32 里没有 qhyccd.dll，它散落在 Program Files 的各种目录下
+    （QHYCCD / 态势感知 / SharpCap），只按名字找必然加载失败。"""
+    import platform
+    from core import qhy
+    monkeypatch.setattr(platform, "system", lambda: "Windows")
+    cands = qhy._library_candidates()
+    assert cands[0] == "qhyccd.dll", "仍应先试系统搜索路径"
+    assert all(isinstance(c, str) for c in cands)
