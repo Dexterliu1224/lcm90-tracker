@@ -644,8 +644,15 @@ $("dlg-mount-close").onclick=()=>$("dlg-mount").close();
 $("dlg-mount-retry").onclick=()=>{ $("dlg-mount").close(); $("b-mount").click(); };
 
 $("b-mount-off").onclick=async()=>{
-  try{ const d=await act("/api/mount/disconnect"); say(d.message||"基座已断开。"); }
+  const btn=$("b-mount-off"); btn.disabled=true;
+  say("正在断开基座 …");
+  try{
+    const d=await act("/api/mount/disconnect");
+    $("mountinfo").textContent="";   // 不擦的话，已断开的望远镜固件信息会一直挂着
+    say(d.message||"基座已断开。");
+  }
   catch(err){ say("断开失败："+err.message,true); }
+  finally{ btn.disabled=false; }
 };
 $("b-cam-off").onclick=async()=>{
   const btn=$("b-cam-off"); btn.disabled=true;
@@ -676,14 +683,15 @@ $("b-cam").onclick=async()=>{
 
 /* ── 星点识别 ─────────────────────────────────────────── */
 /* starsOn / starTimer 在文件上方与 goLogin 一起声明 */
-$("b-stars").onclick=()=>{
-  starsOn=!starsOn;
+function setStars(on){
+  starsOn=!!on;
   $("b-stars").textContent=starsOn?"关闭星点":"识别星点";
   $("stars-ov").classList.toggle("show",starsOn);
   if(starTimer){ clearInterval(starTimer); starTimer=null; }
   if(starsOn){ refreshStars(); starTimer=setInterval(refreshStars,3000); }
   else{ $("stars-ov").innerHTML=""; $("starinfo").textContent=""; }
-};
+}
+$("b-stars").onclick=()=>setStars(!starsOn);
 async function refreshStars(){
   if(!starsOn) return;
   let d;
@@ -729,14 +737,16 @@ async function pickStar(s){
 }
 
 /* ── 录制 ─────────────────────────────────────────────── */
-let recOn=false;
+let recOn=false, recBusy=false;
 $("b-rec").onclick=async()=>{
-  const btn=$("b-rec"); btn.disabled=true;
+  const btn=$("b-rec"); btn.disabled=true; recBusy=true;
   try{
     const d=await act(recOn?"/api/record/stop":"/api/record/start");
     say(d.message||"");
   }catch(err){ say("录制失败："+err.message,true); }
-  finally{ btn.disabled=false; }
+  // 只解除「忙」标志，按钮该不该亮交给 renderRec 按真实状态决定 ——
+  // 无脑 disabled=false 会在相机已关时把它错误点亮
+  finally{ recBusy=false; }
 };
 function fmtDur(s){
   s=Math.max(0,Math.round(s));
@@ -749,8 +759,10 @@ function renderRec(rec,cameraOpened){
   const btn=$("b-rec");
   btn.classList.toggle("on",recOn);
   $("rec-label").textContent=recOn?"停止录制":"录制";
-  // 没画面就录不了；正在录的时候按钮当然要能点（用来停）
-  btn.disabled=!recOn&&!cameraOpened;
+  // 没画面就录不了；正在录的时候按钮当然要能点（用来停）。
+  // 正在等 start/stop 应答时不要去动它：poll 每 500ms 跑一次，
+  // 会把点击处理器设的防重入 disabled 提前解除，用户能连点出两次请求。
+  if(!recBusy) btn.disabled=!recOn&&!cameraOpened;
   const chip=$("ch-rec");
   chip.style.display=recOn?"":"none";
   if(recOn){
@@ -910,7 +922,11 @@ async function poll(){
     $("b-cam-off").style.display   = s.camera_opened?"":"none";
     renderRec(s.record, s.camera_opened);
     $("b-stars").disabled=!s.camera_opened;
-    if(!s.camera_opened&&starsOn) $("b-stars").click();   // 关画面就收起叠加层
+    // 关画面就收起叠加层。**不能**用 $("b-stars").click()：上一行刚把它
+    // 置成 disabled，而按 HTML 规范对 disabled 控件调 click() 是空操作 ——
+    // 结果是叠加层收不起来、星点的 setInterval 永远停不下来，
+    // 每 3 秒对着一个没有画面的后端白跑一次。
+    if(!s.camera_opened&&starsOn) setStars(false);
     if(s.user){
       $("who").textContent=s.user.username+
         (s.user.role==="admin"?" · 管理员":"");

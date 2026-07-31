@@ -131,6 +131,20 @@ def _check_webview() -> int:
     return 0
 
 
+def _msgbox(title: str, text: str) -> None:
+    """弹一个系统消息框。打包成无控制台的窗口程序后，print 只会进日志文件，
+    而用户正盯着一个什么都没有的屏幕 —— 这时候必须有个能看见的出口。
+    用 Windows 自带的 MessageBoxW，零依赖；其它平台退化成打印。"""
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            ctypes.windll.user32.MessageBoxW(0, text, title, 0x40)  # MB_ICONINFORMATION
+            return
+        except Exception:
+            logger.debug("弹出消息框失败", exc_info=True)
+    print("\n  %s\n  %s" % (title, text))
+
+
 def _open_window(url: str, on_closed) -> bool:
     """开原生窗口。返回 False 表示开不出来（调用方应退回浏览器）。"""
     try:
@@ -269,6 +283,15 @@ def main() -> int:
         opened = _open_window(url, _on_closed)
         if not opened:
             print("    已改用浏览器打开。下次也可以直接加 --browser 参数。")
+            # 打包版没有控制台，上面这句只会进 app.log。用户面对的是一个
+            # 没有任何界面、也不知道怎么关掉的后台进程 —— 必须弹窗告诉他。
+            _msgbox("LCM90 视觉跟踪台",
+                    "打不开程序窗口，已改用浏览器显示界面。\n\n"
+                    "这台电脑可能缺少 Microsoft Edge WebView2 运行时，"
+                    "装一次就能恢复成独立窗口：\n"
+                    "https://go.microsoft.com/fwlink/p/?LinkId=2124703\n\n"
+                    "现在要退出程序，请关掉浏览器页面后，"
+                    "在任务管理器里结束 lcm90-tracker。")
 
     if not opened:
         try:
@@ -282,9 +305,20 @@ def main() -> int:
         except KeyboardInterrupt:
             pass
 
-    # 收尾：停服务并等它把 shutdown 事件跑完（录像文件要正常收口）
+    # ---- 收尾 ----
+    # 关键：**先**主动停一切，再去等 uvicorn。
+    # 反过来（先 join 再指望 lifespan）是不行的：uvicorn 的优雅关闭要等所有
+    # 响应结束，而 /video 是长连接；它没结束，shutdown 事件就一句都不跑，
+    # 「停基座」被整个跳过 —— 关了窗望远镜还在转，这是最不能接受的故障。
+    try:
+        from app.main import shutdown_now
+        shutdown_now()          # 幂等，lifespan 那边再调一次也无妨
+    except Exception:
+        logger.exception("主动收尾失败")
     server.should_exit = True
     thread.join(timeout=10.0)
+    if thread.is_alive():
+        logger.warning("服务线程没能在 10 秒内退出，但设备已停")
     return 0
 
 

@@ -67,6 +67,14 @@ def _under_root(rel: str) -> str:
     return os.path.join(ROOT, rel)
 
 
+import atexit
+import threading
+
+#: 置位后所有 /video 流立即收尾。关程序时必须先放掉它们，
+#: 否则 uvicorn 的优雅关闭会一直等这些永不结束的响应。
+_stream_stop = threading.Event()
+_shutdown_done = threading.Event()
+
 _auth_cfg = dict(_CFG.get("auth", {}) or {})
 users = UserStore(_under_root(str(_auth_cfg.get("file", "data/users.json"))))
 sessions = SessionStore()
@@ -249,14 +257,20 @@ def api_add_user(req: NewUserReq, request: Request) -> Dict[str, Any]:
 
 
 @app.post("/api/users/{username}/password")
-def api_reset_password(username: str, req: ResetPwdReq,
-                       request: Request) -> Dict[str, Any]:
-    _require_admin(request)
+def api_reset_password(username: str, req: ResetPwdReq, request: Request,
+                       response: Response) -> Dict[str, Any]:
+    me = _require_admin(request)
     try:
         users.reset_password(username, req.password)
     except AuthError as exc:
         raise HTTPException(400, str(exc))
     sessions.drop_user(username)     # 被重置的人必须重新登录
+    if username == me:
+        # 管理员重置的是自己：drop_user 刚把自己的票也作废了，
+        # 不补发新票的话，下一拍 poll 就会拿 401 把他弹回登录页 ——
+        # 看起来就像「改个密码怎么被踢出去了」。
+        response.set_cookie(SESSION_COOKIE, sessions.create(me),
+                            httponly=True, samesite="lax", secure=False)
     return {"ok": True, "message": "已重置「%s」的密码。" % username}
 
 
@@ -353,9 +367,18 @@ def api_record_stop() -> Dict[str, Any]:
 @app.get("/video")
 def video():
     def gen():
-        while True:
+        # 没画面时也必须周期性 yield 一个空片段。
+        # 原来的写法在 frame 为 None 时**永不 yield**，于是：
+        #   * 客户端断开探测不到（探测发生在 yield 之后的写操作上），
+        #     这条流会一直占着一个同步线程池名额；
+        #   * 关程序时 uvicorn 的优雅关闭要等所有响应结束，
+        #     这个 while True 永远不结束 → shutdown 事件一句都不跑
+        #     → 停基座、收录像全部被跳过，望远镜关窗后还在转。
+        idle = 0
+        while not _stream_stop.is_set():
             frame = session.annotated_frame()
             if frame is not None:
+                idle = 0
                 ok, buf = cv2.imencode(".jpg", frame,
                                        [int(cv2.IMWRITE_JPEG_QUALITY), 72])
                 if ok:
@@ -363,6 +386,15 @@ def video():
                     yield (b"--frame\r\nContent-Type: image/jpeg\r\n"
                            b"Content-Length: " + str(len(data)).encode()
                            + b"\r\n\r\n" + data + b"\r\n")
+            else:
+                idle += 1
+                # 空注释块：合法的 multipart 片段，只为把「客户端还在不在」
+                # 这件事问出来。多帧一次即可，别刷屏。
+                if idle % 18 == 0:
+                    yield b"--frame\r\nContent-Type: text/plain\r\n\r\n\r\n"
+                # 相机关掉后没必要再吊着这条连接，前端会自己重新挂
+                if idle > 18 * 10:
+                    break
             time.sleep(1 / 18)      # 网页 18fps 足够
     return StreamingResponse(gen(),
                              media_type="multipart/x-mixed-replace; boundary=frame")
@@ -520,9 +552,32 @@ def api_status(request: Request) -> Dict[str, Any]:
     return st
 
 
+def shutdown_now() -> None:
+    """停掉一切。**幂等**，可以被 lifespan 和 serve.py 各调一次。
+
+    为什么不能只挂在 FastAPI 的 shutdown 事件上：那条路要等所有响应结束，
+    而 /video 是长连接。一旦它没能结束，shutdown 就永远不执行 ——
+    「停基座」是本程序唯一的停电机路径，绝不能吊在一条可能走不完的链上。
+    """
+    if _shutdown_done.is_set():
+        return
+    _shutdown_done.set()
+    _stream_stop.set()          # 先放掉视频流，否则谁都等不到它
+    try:
+        recorder.shutdown()     # 先收录像：没 release 就是个播不了的半截文件
+    except Exception:
+        log.exception("关闭录像失败")
+    try:
+        session.shutdown()      # 里面会把基座速率清零并断开
+    except Exception:
+        log.exception("关闭跟踪会话失败")
+
+
 @app.on_event("shutdown")
 def _shutdown():
-    # 先收录像：视频文件没 release 就是个播不了的半截文件，
-    # 而跟踪会话那边最坏也只是晚几秒停。
-    recorder.shutdown()
-    session.shutdown()
+    shutdown_now()
+
+
+# 最后一道保险：进程无论以什么方式退出，望远镜都必须停下来。
+# 全仓库以前没有任何 atexit / 信号处理，停电机只有 lifespan 一条路。
+atexit.register(shutdown_now)
