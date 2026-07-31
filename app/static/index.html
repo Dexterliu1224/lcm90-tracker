@@ -110,8 +110,62 @@ body{margin:0;background:var(--bg0);color:var(--text);
 .btn.danger:hover{background:rgba(255,95,122,.12)}
 .btnrow{display:flex;gap:9px;flex-wrap:wrap;align-items:center}
 
+/* ── 录制按钮 ── */
+.btn.rec{display:inline-flex;align-items:center;gap:8px;
+  color:#ff8a9b;border-color:rgba(255,95,122,.38)}
+.btn.rec:hover:not(:disabled){background:rgba(255,95,122,.12);border-color:var(--err)}
+.btn.rec .dot{width:9px;height:9px;border-radius:50%;background:currentColor;
+  flex:0 0 auto}
+.btn.rec.on{color:#fff;background:rgba(255,95,122,.22);border-color:var(--err)}
+.btn.rec.on .dot{background:#ff2d55;animation:recblink 1.1s steps(1,end) infinite}
+@keyframes recblink{0%,55%{opacity:1}56%,100%{opacity:.15}}
+#recinfo{margin-top:9px;font:11.5px/1.6 var(--mono);color:var(--faint);
+  min-height:1em}
+#recinfo b{color:#ff8a9b;font-weight:600}
+.chip.rec{color:#ff8a9b;border-color:rgba(255,95,122,.45);
+  background:rgba(255,95,122,.12)}
+
+/* ── 顶栏用户区 ── */
+.userbox{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.userbox .who{font:600 11.5px/1 var(--mono);color:var(--cy);letter-spacing:.05em}
+.lnk{background:none;border:0;padding:0;cursor:pointer;
+  font:11.5px/1 var(--sans);color:var(--dim);letter-spacing:.05em;
+  text-decoration:underline;text-underline-offset:3px;
+  text-decoration-color:rgba(143,166,191,.4);transition:.15s}
+.lnk:hover{color:var(--cy);text-decoration-color:var(--cy)}
+#pwdwarn{display:none;margin:0 0 14px;padding:10px 14px;
+  background:rgba(255,190,60,.1);border:1px solid rgba(255,190,60,.4);
+  color:#ffcf6b;font-size:12.5px;line-height:1.6;
+  clip-path:polygon(9px 0,100% 0,100% calc(100% - 9px),calc(100% - 9px) 100%,0 100%,0 9px)}
+#pwdwarn.show{display:block}
+#pwdwarn b{color:#ffdf9b}
+#pwdwarn .lnk{color:#ffcf6b;margin-left:8px;
+  text-decoration-color:rgba(255,207,107,.5)}
+#pwdwarn .lnk:hover{color:#fff;text-decoration-color:#fff}
+
+/* ── 对话框里的表单与账号表 ── */
+.ffield{margin-bottom:11px}
+.ffield label{display:block;font:600 11px/1 var(--sans);color:var(--dim);
+  letter-spacing:.08em;margin:0 0 6px}
+.ffield input{width:100%}
+.dnote{margin:12px 0 0;font-size:11.5px;line-height:1.65;color:var(--faint)}
+.dnote.err{color:var(--err)}
+.dnote.ok{color:var(--cy)}
+.utab{width:100%;border-collapse:collapse;font-size:12.5px}
+.utab td{padding:8px 6px;border-bottom:1px solid var(--line)}
+.utab td:first-child{font:600 12.5px var(--mono);color:var(--text)}
+.utab .role{color:var(--faint);font-size:11px;letter-spacing:.06em}
+.utab .acts{text-align:right;white-space:nowrap}
+.utab .acts .lnk{margin-left:10px}
+.utab .lnk.del{color:var(--err);text-decoration-color:rgba(255,95,122,.45)}
+.utab .lnk.del:hover{color:#ff9aa8}
+.usep{margin:16px 0 9px;font:600 11px/1 var(--sans);color:var(--cy);
+  letter-spacing:.14em;text-transform:uppercase}
+
 /* ── 表单 ── */
-select,input[type=text]{font:inherit;color:var(--text);background:rgba(10,16,30,.8);
+select,input[type=text],input[type=password],
+.ffield input,#nu-name,#nu-pwd{
+  font:inherit;color:var(--text);background:rgba(10,16,30,.8);
   border:1px solid var(--line2);padding:9px 11px;min-width:0;
   clip-path:polygon(7px 0,100% 0,100% calc(100% - 7px),calc(100% - 7px) 100%,0 100%,0 7px)}
 select:focus,input:focus{outline:1px solid var(--cy)}
@@ -219,7 +273,19 @@ dialog .dfoot{padding:12px 18px 16px;display:flex;gap:9px;justify-content:flex-e
       <span class="chip" id="ch-cam">相机 未开启</span>
       <span class="chip" id="ch-calib">未标定</span>
       <span class="chip" id="ch-state">待机</span>
+      <span class="chip" id="ch-rec" style="display:none"></span>
     </div>
+    <div class="userbox">
+      <span class="who" id="who">—</span>
+      <button class="lnk" id="b-pwd">修改密码</button>
+      <button class="lnk" id="b-users" style="display:none">账号管理</button>
+      <button class="lnk" id="b-logout">退出</button>
+    </div>
+  </div>
+
+  <div id="pwdwarn">
+    还在用<b>出厂密码</b>，任何人都能打开这台望远镜。
+    <button class="lnk" id="b-pwd2">立即修改</button>
   </div>
 
   <div class="cols">
@@ -245,7 +311,11 @@ dialog .dfoot{padding:12px 18px 16px;display:flex;gap:9px;justify-content:flex-e
           <button class="btn" id="b-calib" disabled>自动标定</button>
           <button class="btn" id="b-clear" disabled>重选目标</button>
           <button class="btn danger" id="b-stop" disabled>停止</button>
+          <button class="btn rec" id="b-rec" disabled>
+            <span class="dot"></span><span id="rec-label">录制</span>
+          </button>
         </div>
+        <div id="recinfo"></div>
       </div>
     </div>
 
@@ -335,12 +405,58 @@ dialog .dfoot{padding:12px 18px 16px;display:flex;gap:9px;justify-content:flex-e
   </div>
 </dialog>
 
+<!-- 修改密码 -->
+<dialog id="dlg-pwd">
+  <div class="dhead">修改密码</div>
+  <div class="dbody">
+    <div class="ffield"><label for="pw-old">原密码</label>
+      <input id="pw-old" type="password" autocomplete="current-password"></div>
+    <div class="ffield"><label for="pw-new">新密码</label>
+      <input id="pw-new" type="password" autocomplete="new-password"></div>
+    <div class="ffield"><label for="pw-new2">再输一遍</label>
+      <input id="pw-new2" type="password" autocomplete="new-password"></div>
+    <p class="dnote" id="pw-msg">至少 4 位。改完之后其它设备上的登录会失效。</p>
+  </div>
+  <div class="dfoot">
+    <button class="btn" id="pw-cancel">取消</button>
+    <button class="btn primary" id="pw-ok">确认修改</button>
+  </div>
+</dialog>
+
+<!-- 账号管理（仅管理员） -->
+<dialog id="dlg-users">
+  <div class="dhead">账号管理</div>
+  <div class="dbody">
+    <table class="utab"><tbody id="ulist"></tbody></table>
+    <div class="usep">新建账号</div>
+    <div class="frow" style="grid-template-columns:1fr 1fr auto;gap:7px">
+      <input id="nu-name" placeholder="用户名" spellcheck="false">
+      <input id="nu-pwd" type="password" placeholder="密码" autocomplete="new-password">
+      <select id="nu-role" aria-label="角色">
+        <option value="user">普通</option>
+        <option value="admin">管理员</option>
+      </select>
+    </div>
+    <button class="btn" id="nu-add" style="width:100%;margin-top:8px">添加</button>
+    <p class="dnote" id="us-msg">
+      普通账号能操作望远镜、改自己的密码；管理员还能管理账号。</p>
+  </div>
+  <div class="dfoot">
+    <button class="btn" id="us-close">关闭</button>
+  </div>
+</dialog>
+
 <script>
 "use strict";
 const $=id=>document.getElementById(id);
-const api=async(p,body)=>{
-  const r=await fetch(p,body?{method:"POST",
-    headers:{"Content-Type":"application/json"},body:JSON.stringify(body)}:{});
+const api=async(p,body,method)=>{
+  const opt = method ? {method:method} : (body?{method:"POST"}:{});
+  if(body){ opt.headers={"Content-Type":"application/json"};
+            opt.body=JSON.stringify(body); }
+  const r=await fetch(p,opt);
+  // 会话过期就整页跳回登录页。不跳的话，界面会静静地一直报 401，
+  // 用户看到的是「所有按钮都没反应」，根本猜不到是登录掉了。
+  if(r.status===401){ location.href="/login"; throw new Error("登录已过期"); }
   const d=await r.json().catch(()=>({}));
   if(!r.ok) throw new Error(d.detail||("HTTP "+r.status));
   // 后端的「温和失败」是 HTTP 200 + ok:false + 中文原因。
@@ -509,6 +625,136 @@ $("b-cam").onclick=async()=>{
   finally{ btn.disabled=false; }
 };
 
+/* ── 录制 ─────────────────────────────────────────────── */
+let recOn=false;
+$("b-rec").onclick=async()=>{
+  const btn=$("b-rec"); btn.disabled=true;
+  try{
+    const d=await act(recOn?"/api/record/stop":"/api/record/start");
+    say(d.message||"");
+  }catch(err){ say("录制失败："+err.message,true); }
+  finally{ btn.disabled=false; }
+};
+function fmtDur(s){
+  s=Math.max(0,Math.round(s));
+  const m=Math.floor(s/60);
+  return (m<10?"0":"")+m+":"+((s%60)<10?"0":"")+(s%60);
+}
+function renderRec(rec,cameraOpened){
+  rec=rec||{};
+  recOn=!!rec.recording;
+  const btn=$("b-rec");
+  btn.classList.toggle("on",recOn);
+  $("rec-label").textContent=recOn?"停止录制":"录制";
+  // 没画面就录不了；正在录的时候按钮当然要能点（用来停）
+  btn.disabled=!recOn&&!cameraOpened;
+  const chip=$("ch-rec");
+  chip.style.display=recOn?"":"none";
+  if(recOn){
+    chip.textContent="● 录制 "+fmtDur(rec.seconds);
+    chip.className="chip rec";
+    $("recinfo").innerHTML="正在录制 <b>"+rec.file+"</b> · "+
+      fmtDur(rec.seconds)+" · "+rec.size_mb+" MB";
+  }else if(rec.note){
+    $("recinfo").textContent=rec.note;
+  }else if(rec.file){
+    $("recinfo").innerHTML="上一段已保存：<b>"+rec.file+"</b>（"+rec.size_mb+" MB）"+
+      " · 在程序目录的 data\\recordings 里";
+  }else{
+    $("recinfo").textContent="";
+  }
+}
+
+/* ── 账号 ─────────────────────────────────────────────── */
+$("b-logout").onclick=async()=>{
+  try{ await act("/api/logout"); }catch(e){}
+  location.href="/login";
+};
+
+function openPwd(){
+  $("pw-old").value=$("pw-new").value=$("pw-new2").value="";
+  setNote("pw-msg","至少 4 位。改完之后其它设备上的登录会失效。");
+  $("dlg-pwd").showModal();
+  $("pw-old").focus();
+}
+function setNote(id,text,cls){
+  const n=$(id); n.textContent=text; n.className="dnote"+(cls?" "+cls:"");
+}
+$("b-pwd").onclick=openPwd;
+$("b-pwd2").onclick=openPwd;
+$("pw-cancel").onclick=()=>$("dlg-pwd").close();
+$("pw-ok").onclick=async()=>{
+  const oldp=$("pw-old").value, np=$("pw-new").value, np2=$("pw-new2").value;
+  if(np!==np2){ setNote("pw-msg","两次输入的新密码不一样。","err"); return; }
+  if(np.length<4){ setNote("pw-msg","新密码至少 4 位。","err"); return; }
+  const btn=$("pw-ok"); btn.disabled=true;
+  try{
+    const d=await api("/api/password",{old_password:oldp,new_password:np});
+    $("dlg-pwd").close();
+    say(d.message||"密码已修改。");
+  }catch(err){ setNote("pw-msg",err.message,"err"); }
+  finally{ btn.disabled=false; }
+};
+
+async function loadUsers(){
+  const tb=$("ulist"); tb.innerHTML="";
+  let d;
+  try{ d=await api("/api/users"); }
+  catch(err){ setNote("us-msg",err.message,"err"); return; }
+  d.users.forEach(u=>{
+    const tr=document.createElement("tr");
+    const isMe=u.username===d.me;
+    tr.innerHTML=
+      "<td></td><td class='role'></td><td class='acts'></td>";
+    tr.children[0].textContent=u.username+(isMe?"（当前）":"");
+    tr.children[1].textContent=(u.role==="admin"?"管理员":"普通")+
+      (u.is_default_password?" · 出厂密码":"");
+    const acts=tr.children[2];
+    const reset=document.createElement("button");
+    reset.className="lnk"; reset.textContent="重置密码";
+    reset.onclick=()=>resetPwd(u.username);
+    acts.appendChild(reset);
+    if(!isMe){
+      const del=document.createElement("button");
+      del.className="lnk del"; del.textContent="删除";
+      del.onclick=()=>delUser(u.username);
+      acts.appendChild(del);
+    }
+    tb.appendChild(tr);
+  });
+}
+async function resetPwd(name){
+  const pw=prompt("给「"+name+"」设置新密码（至少 4 位）：");
+  if(pw===null) return;
+  try{
+    const d=await api("/api/users/"+encodeURIComponent(name)+"/password",
+                      {password:pw});
+    setNote("us-msg",d.message,"ok"); loadUsers();
+  }catch(err){ setNote("us-msg",err.message,"err"); }
+}
+async function delUser(name){
+  if(!confirm("确定删除账号「"+name+"」？此人会立刻被踢下线。")) return;
+  try{
+    const d=await api("/api/users/"+encodeURIComponent(name),null,"DELETE");
+    setNote("us-msg",d.message,"ok"); loadUsers();
+  }catch(err){ setNote("us-msg",err.message,"err"); }
+}
+$("b-users").onclick=()=>{
+  setNote("us-msg","普通账号能操作望远镜、改自己的密码；管理员还能管理账号。");
+  $("dlg-users").showModal(); loadUsers();
+};
+$("us-close").onclick=()=>$("dlg-users").close();
+$("nu-add").onclick=async()=>{
+  const btn=$("nu-add"); btn.disabled=true;
+  try{
+    const d=await api("/api/users",{username:$("nu-name").value.trim(),
+      password:$("nu-pwd").value, role:$("nu-role").value});
+    $("nu-name").value=$("nu-pwd").value="";
+    setNote("us-msg",d.message,"ok"); loadUsers();
+  }catch(err){ setNote("us-msg",err.message,"err"); }
+  finally{ btn.disabled=false; }
+};
+
 $("b-calib").onclick=()=>act("/api/calibrate").catch(e=>say(e.message,true));
 $("b-track").onclick=()=>act("/api/track/start").catch(e=>say(e.message,true));
 $("b-stop").onclick=()=>act("/api/track/stop").catch(()=>{});
@@ -558,6 +804,13 @@ async function poll(){
     $("b-mount-off").style.display = s.mount_connected?"":"none";
     $("b-cam").style.display       = s.camera_opened?"none":"";
     $("b-cam-off").style.display   = s.camera_opened?"":"none";
+    renderRec(s.record, s.camera_opened);
+    if(s.user){
+      $("who").textContent=s.user.username+
+        (s.user.role==="admin"?" · 管理员":"");
+      $("b-users").style.display = s.user.role==="admin"?"":"none";
+      $("pwdwarn").classList.toggle("show", !!s.user.is_default_password);
+    }
     setChip("ch-calib", s.calibrated?"已标定":"未标定", s.calibrated?"on":"warn");
     setChip("ch-state", ST_NAME[s.state]||s.state,
             s.state==="tracking"?"cy":(s.state==="lost"?"err":""));

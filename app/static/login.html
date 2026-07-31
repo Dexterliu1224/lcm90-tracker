@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>登录 · LCM90 视觉跟踪台</title>
+<style>
+:root{
+  --bg:#050a14; --panel:rgba(12,20,38,.82); --line:rgba(77,214,255,.18);
+  --line2:rgba(77,214,255,.32); --cy:#4dd6ff; --tx:#dbe9f7; --dim:#8fa6bf;
+  --faint:#5d7794; --err:#ff6b7a;
+  --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+}
+*{box-sizing:border-box}
+html,body{height:100%}
+body{margin:0;background:var(--bg);color:var(--tx);
+  font:14px/1.6 system-ui,-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;
+  display:flex;align-items:center;justify-content:center;overflow:hidden}
+canvas#stars{position:fixed;inset:0;width:100%;height:100%;z-index:0}
+#nebula{position:fixed;inset:0;z-index:0;pointer-events:none;
+  background:radial-gradient(60% 45% at 50% 30%,rgba(77,214,255,.10),transparent 70%),
+             radial-gradient(50% 40% at 20% 80%,rgba(120,90,255,.08),transparent 70%)}
+.wrap{position:relative;z-index:1;width:min(92vw,380px)}
+.brand{display:flex;align-items:center;gap:13px;margin-bottom:22px;justify-content:center}
+.brand h1{margin:0;font-size:19px;font-weight:600;letter-spacing:.02em}
+.brand h1 b{color:var(--cy);font-weight:700}
+.brand .sub{font:11px/1.2 var(--mono);color:var(--faint);letter-spacing:.16em;
+  text-transform:uppercase;margin-top:3px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:14px;
+  padding:26px 24px 22px;backdrop-filter:blur(4px);
+  box-shadow:0 18px 50px rgba(0,0,0,.5)}
+.card h2{margin:0 0 18px;font-size:13px;font-weight:600;color:var(--cy);
+  letter-spacing:.14em;text-transform:uppercase}
+label{display:block;font-size:11.5px;color:var(--dim);margin:0 0 6px;
+  letter-spacing:.06em}
+input{width:100%;background:rgba(6,12,24,.9);color:var(--tx);
+  border:1px solid var(--line2);border-radius:8px;padding:11px 12px;
+  font:14px var(--mono);outline:none;transition:.15s}
+input:focus{border-color:var(--cy);box-shadow:0 0 0 3px rgba(77,214,255,.12)}
+.field{margin-bottom:14px}
+button{width:100%;margin-top:6px;background:linear-gradient(180deg,#0b3550,#072438);
+  color:var(--cy);border:1px solid var(--line2);border-radius:8px;
+  padding:12px;font:600 14px/1 inherit;cursor:pointer;transition:.15s;
+  letter-spacing:.08em}
+button:hover:not(:disabled){border-color:var(--cy);
+  box-shadow:0 0 18px rgba(77,214,255,.18)}
+button:disabled{opacity:.5;cursor:default}
+#err{display:none;margin:14px 0 0;padding:9px 11px;border-radius:7px;
+  background:rgba(255,107,122,.1);border:1px solid rgba(255,107,122,.35);
+  color:var(--err);font-size:12.5px;line-height:1.55}
+#err.show{display:block}
+.hint{margin:16px 0 0;font-size:11.5px;line-height:1.7;color:var(--faint);
+  text-align:center;border-top:1px solid var(--line);padding-top:14px}
+.hint code{font-family:var(--mono);color:var(--dim)}
+</style>
+</head>
+<body>
+<canvas id="stars"></canvas><div id="nebula"></div>
+
+<div class="wrap">
+  <div class="brand">
+    <svg width="34" height="34" viewBox="0 0 34 34" fill="none" aria-hidden="true">
+      <path d="M17 2 L30 9.5 V24.5 L17 32 L4 24.5 V9.5 Z"
+            stroke="#4dd6ff" stroke-width="1.4" opacity=".9"/>
+      <circle cx="17" cy="17" r="6.5" stroke="#4dd6ff" stroke-width="1.2"/>
+      <circle cx="17" cy="17" r="1.8" fill="#4dd6ff"/>
+      <path d="M17 8.5 v4 M17 21.5 v4 M8.5 17 h4 M21.5 17 h4"
+            stroke="#4dd6ff" stroke-width="1.1" opacity=".8"/>
+    </svg>
+    <div>
+      <h1>LCM90 <b>视觉跟踪台</b></h1>
+      <div class="sub">Visual Target Tracker</div>
+    </div>
+  </div>
+
+  <form class="card" id="form" autocomplete="on">
+    <h2>登录</h2>
+    <div class="field">
+      <label for="u">用户名</label>
+      <input id="u" name="username" autocomplete="username" autofocus
+             spellcheck="false" required>
+    </div>
+    <div class="field">
+      <label for="p">密码</label>
+      <input id="p" name="password" type="password"
+             autocomplete="current-password" required>
+    </div>
+    <button type="submit" id="go">进入控制台</button>
+    <p id="err"></p>
+    <p class="hint">
+      首次使用请用出厂账号 <code>admin</code> / <code>admin</code> 登录，<br>
+      进去后请立刻修改密码。<br>
+      忘记密码：删掉程序目录下的 <code>data\users.json</code> 再重启，<br>
+      会重新生成出厂账号。
+    </p>
+  </form>
+</div>
+
+<script>
+/* 星空背景：和主界面同一套观感，纯装饰 */
+(function(){
+  const c=document.getElementById("stars"),x=c.getContext("2d");
+  let stars=[];
+  function build(){
+    c.width=innerWidth; c.height=innerHeight;
+    const n=Math.round(innerWidth*innerHeight/9000);
+    stars=Array.from({length:n},()=>({
+      x:Math.random()*c.width, y:Math.random()*c.height,
+      r:Math.random()*1.25+.25, a:Math.random(), s:Math.random()*.018+.004}));
+  }
+  function draw(){
+    x.clearRect(0,0,c.width,c.height);
+    for(const st of stars){
+      st.a+=st.s; const al=.28+.42*Math.abs(Math.sin(st.a));
+      x.beginPath(); x.arc(st.x,st.y,st.r,0,6.284);
+      x.fillStyle="rgba(200,225,255,"+al.toFixed(3)+")"; x.fill();
+    }
+    requestAnimationFrame(draw);
+  }
+  addEventListener("resize",build); build(); draw();
+})();
+
+const $=id=>document.getElementById(id);
+function fail(msg){ const e=$("err"); e.textContent=msg; e.classList.add("show"); }
+
+$("form").addEventListener("submit", async ev=>{
+  ev.preventDefault();
+  const btn=$("go");
+  $("err").classList.remove("show");
+  btn.disabled=true; btn.textContent="正在登录 …";
+  try{
+    const r=await fetch("/api/login",{
+      method:"POST", headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({username:$("u").value, password:$("p").value})});
+    const d=await r.json().catch(()=>({}));
+    if(!r.ok){ fail(d.detail||("登录失败（HTTP "+r.status+"）")); return; }
+    // 登录成功：整页跳转，让 Cookie 在后续所有请求（含 /video 流）上生效
+    location.href="/";
+  }catch(e){
+    fail("连不上服务端："+e.message+"。程序窗口是不是关掉了？");
+  }finally{
+    // finally 不能省：失败后按钮要能再点，否则输错一次就卡死
+    btn.disabled=false; btn.textContent="进入控制台";
+  }
+});
+</script>
+</body>
+</html>

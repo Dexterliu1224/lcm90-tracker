@@ -57,3 +57,13 @@ calibration:
   file: data/calibration.json
 
 server: {host: "127.0.0.1", port: 8300}
+
+auth:
+  # 账号存这里（口令是加盐散列，不是明文）。
+  # 忘记密码：把这个文件删掉再启动，会重新生成出厂账号 admin / admin。
+  file: data/users.json
+
+recording:
+  dir: data/recordings     # 录像存放目录，相对路径按程序所在目录算
+  fps: 15                  # 录像帧率。调高更流畅，文件也更大
+  max_minutes: 60          # 单段录像最长时长，到点自动停，防止忘了关把磁盘写满

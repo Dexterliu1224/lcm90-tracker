@@ -18,6 +18,11 @@ def _post_routes() -> set:
     return set(re.findall(r'@app\.post\("([^"]+)"\)', src))
 
 
+def _get_routes() -> set:
+    src = (ROOT / "app" / "main.py").read_text(encoding="utf-8")
+    return set(re.findall(r'@app\.get\("([^"]+)"\)', src))
+
+
 def _frontend_calls():
     """返回 [(接口路径, 是否带 body), ...]，只统计 api(...) 直接调用。"""
     src = (ROOT / "app" / "static" / "index.html").read_text(encoding="utf-8")
@@ -28,7 +33,10 @@ def _frontend_calls():
 
 
 def test_post_routes_are_never_called_without_body():
-    post = _post_routes()
+    # 同一路径可以同时挂 GET 和 POST（/api/users 就是：GET 列表、POST 新建）。
+    # 这种路径上的无参调用是**故意**的 GET，不算违约；只有「光有 POST」
+    # 的路径被无参调用才会吃 405。
+    post = _post_routes() - _get_routes()
     bad = [p for p, has_body in _frontend_calls()
            if p in post and not has_body]
     assert not bad, (
