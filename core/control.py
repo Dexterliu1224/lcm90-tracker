@@ -317,10 +317,13 @@ class TrackingSession:
     # ---------------- 设备 ----------------
 
     def connect_mount(self, port: Optional[str] = None) -> Dict[str, Any]:
+        # 已连接时不能"直接返回"：用户从真基座切到仿真（或反过来）时，
+        # 早退会让底下还是原来的设备 —— 实测出过界面选着仿真、
+        # 标定指令却打到真望远镜上的事故。必须先拆旧的再建新的。
         with self._lock:
-            if self._mount is not None and getattr(self._mount, "connected", False):
-                return {"ok": True, "message": "基座已经连接。",
-                        "info": self._safe_mount_info()}
+            already = self._mount is not None and getattr(self._mount, "connected", False)
+        if already:
+            self.disconnect_mount()
         mcfg = dict(self._cfg.get("mount", {}) or {})
         # 界面的选择是权威，必须覆盖 config 里的 driver ——
         # 否则 config 默认 simulator 时，用户选了真串口点连接，
@@ -637,6 +640,43 @@ class TrackingSession:
         threading.Thread(target=_worker, name="nudge", daemon=True).start()
         return {"ok": True, "message": "微调已开始（az %+.3f°, alt %+.3f°）。"
                                        % (float(d_az), float(d_alt))}
+
+    def disconnect_mount(self) -> Dict[str, Any]:
+        """断开基座。断开前先停跟踪并把速率清零 —— 直接关串口会让
+        基座保持最后一次速率一直转下去，这是会撞限位的。"""
+        self.stop_tracking()
+        with self._lock:
+            mount = self._mount
+            self._mount = None
+        if mount is None:
+            return {"ok": True, "message": "基座本来就没连接。"}
+        try:
+            mount.set_rate(0.0, 0.0)
+        except Exception:
+            logger.exception("断开前停止基座失败")
+        try:
+            mount.close()
+        except Exception:
+            logger.exception("关闭基座失败")
+        return {"ok": True, "message": "基座已断开。"}
+
+    def close_camera(self) -> Dict[str, Any]:
+        """关闭相机。跟踪依赖画面，所以先停跟踪。
+
+        QHY 相机同一时刻只能被一个程序打开，用完必须放手，
+        否则用户切到 EZCAP / SharpCap 时会打不开。"""
+        self.stop_tracking()
+        self.clear_target()
+        with self._lock:
+            cam = self._camera
+            self._camera = None
+        if cam is None:
+            return {"ok": True, "message": "画面源本来就没打开。"}
+        try:
+            cam.close()
+        except Exception:
+            logger.exception("关闭相机失败")
+        return {"ok": True, "message": "画面源已关闭，相机已释放。"}
 
     def shutdown(self) -> None:
         logger.info("正在关闭跟踪会话")

@@ -80,3 +80,21 @@ def test_qhy_scans_common_install_dirs_on_windows(monkeypatch):
     cands = qhy._library_candidates()
     assert cands[0] == "qhyccd.dll", "仍应先试系统搜索路径"
     assert all(isinstance(c, str) for c in cands)
+
+
+def test_reconnect_switches_device():
+    """已连接时再点连接必须真的切换设备，不能早退保留旧的 ——
+    实测出过：先连真基座、再选仿真点连接，界面显示仿真，
+    标定指令却打到真望远镜上（安全事故级）。"""
+    from core.control import TrackingSession
+    s = TrackingSession({"mount": {"driver": "simulator"}})
+    r1 = s.connect_mount(None)                # 仿真
+    assert r1["ok"] is True
+    first = s._mount
+    r2 = s.connect_mount(None)                # 再连一次仿真 → 应换新实例
+    assert r2["ok"] is True
+    assert s._mount is not first, "早退保留旧设备 = 切换失效"
+    # 切到不存在的真串口必须失败，且旧的仿真已被断开（不能留着乱动）
+    r3 = s.connect_mount("/dev/tty.not-exist")
+    assert r3["ok"] is False
+    assert s._mount is None

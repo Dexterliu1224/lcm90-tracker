@@ -181,6 +181,16 @@ def api_mount_connect(req: ConnectReq) -> Dict[str, Any]:
         raise HTTPException(400, str(exc))
 
 
+@app.post("/api/mount/disconnect")
+def api_mount_disconnect() -> Dict[str, Any]:
+    return session.disconnect_mount()
+
+
+@app.post("/api/camera/close")
+def api_camera_close() -> Dict[str, Any]:
+    return session.close_camera()
+
+
 @app.post("/api/camera/open")
 def api_camera_open(req: CameraReq) -> Dict[str, Any]:
     try:

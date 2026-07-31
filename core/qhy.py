@@ -17,6 +17,7 @@ import ctypes
 import logging
 import os
 import platform
+import sys
 import time
 from ctypes import POINTER, byref, c_char_p, c_double, c_int, c_uint8, c_uint32, c_void_p
 from typing import Any, Dict, List, Optional, Tuple
@@ -73,6 +74,25 @@ def _library_candidates() -> List[str]:
     return found
 
 
+def _explicit_library_path() -> Optional[str]:
+    """从 config.yaml 的 camera.qhy.sdk_path 读取显式指定的 SDK 路径。
+
+    自动搜索只覆盖 Program Files 下两层；装到别的盘、或用绿色版解压的
+    情况仍会找不到，这时用户在配置里写死一行即可，不必改代码。
+    """
+    try:
+        import yaml
+        root = (os.path.dirname(os.path.abspath(sys.executable))
+                if getattr(sys, "frozen", False)
+                else os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        with open(os.path.join(root, "config.yaml"), "r", encoding="utf-8") as fh:
+            cfg = yaml.safe_load(fh) or {}
+        p = ((cfg.get("camera", {}) or {}).get("qhy", {}) or {}).get("sdk_path")
+        return str(p).strip() or None if p else None
+    except Exception:
+        return None
+
+
 _sdk_cache: Optional[Any] = None
 _sdk_error: Optional[str] = None
 
@@ -85,7 +105,10 @@ def _load_sdk():
     if _sdk_error is not None:
         return None, _sdk_error
 
-    path = os.environ.get("QHYCCD_LIBRARY")
+    # 优先级：显式配置 > 环境变量 > 自动搜索。
+    # 自动搜索覆盖不到的装机方式（装到 D 盘、绿色版等）靠前两者兜底。
+    explicit = _explicit_library_path()
+    path = explicit or os.environ.get("QHYCCD_LIBRARY")
     candidates = [path] if path else _library_candidates()
     sdk = None
     last_exc: Optional[Exception] = None
@@ -120,6 +143,10 @@ def _load_sdk():
             c_void_p, POINTER(c_uint32), POINTER(c_uint32),
             POINTER(c_uint32), POINTER(c_uint32), POINTER(c_uint8)]
         sdk.GetQHYCCDId.argtypes = [c_uint32, c_char_p]
+        sdk.GetQHYCCDChipInfo.argtypes = [
+            c_void_p, POINTER(c_double), POINTER(c_double),
+            POINTER(c_uint32), POINTER(c_uint32),
+            POINTER(c_double), POINTER(c_double), POINTER(c_uint32)]
         if sdk.InitQHYCCDResource() != QHYCCD_SUCCESS:
             _sdk_error = "QHY SDK 初始化失败（InitQHYCCDResource）"
             return None, _sdk_error
@@ -175,6 +202,8 @@ class QHYCamera(CameraBase):
         self._frame_index = 0
         self._model = "QHY"
         self._size: Tuple[int, int] = (0, 0)
+        #: 最近一帧的 (最小值, 最大值, 均值)，排查"全黑"用
+        self.last_stats: Tuple[int, int, float] = (0, 0, 0.0)
 
     # ------------------------------------------------------------ 生命周期
     def open(self) -> None:
@@ -213,7 +242,27 @@ class QHYCamera(CameraBase):
                            c_double(self._exposure_ms * 1000.0))
         sdk.SetQHYCCDBinMode(self._handle, c_uint32(self._binning),
                              c_uint32(self._binning))
-        # (0,0,0,0) 之外传满幅会因型号而异，这里交给 SDK 用当前 bin 的默认满幅
+
+        # 必须显式设 ROI —— SDK 要求 BeginQHYCCDLive 之前先确定读出区域，
+        # 不设的话取到的画面是未定义的（实测为全黑）。
+        cw, ch_mm = c_double(), c_double()
+        iw, ih = c_uint32(), c_uint32()
+        pw, ph, chip_bpp = c_double(), c_double(), c_uint32()
+        if sdk.GetQHYCCDChipInfo(self._handle, byref(cw), byref(ch_mm),
+                                 byref(iw), byref(ih), byref(pw), byref(ph),
+                                 byref(chip_bpp)) == QHYCCD_SUCCESS:
+            full_w, full_h = int(iw.value), int(ih.value)
+        else:
+            full_w, full_h = 0, 0
+        if full_w > 0 and full_h > 0:
+            roi_w = max(1, full_w // self._binning)
+            roi_h = max(1, full_h // self._binning)
+            rc = sdk.SetQHYCCDResolution(self._handle, c_uint32(0), c_uint32(0),
+                                         c_uint32(roi_w), c_uint32(roi_h))
+            if rc != QHYCCD_SUCCESS:
+                logger.warning("SetQHYCCDResolution 返回 %s，改用 SDK 默认读出区", rc)
+            self._size = (roi_w, roi_h)
+
         length = sdk.GetQHYCCDMemLength(self._handle)
         if int(length) <= 0:
             self.close()
@@ -262,10 +311,24 @@ class QHYCamera(CameraBase):
         channels = max(int(ch.value), 1)
         if width <= 0 or height <= 0:
             return None
+        # 按相机实际返回的位深解析：bpp 之前被读出来却没用，
+        # 16 位相机会被当成 8 位读，取到的是错位数据。
+        depth = int(bpp.value) or 8
+        dtype = np.uint8 if depth <= 8 else np.uint16
         count = width * height * channels
-        raw = np.frombuffer(buf, dtype=np.uint8, count=count)
+        need = count * np.dtype(dtype).itemsize
+        if need > len(buf):
+            return None                      # 缓冲不够，丢弃这帧而不是越界读
+        raw = np.frombuffer(buf, dtype=dtype, count=count)
         img = (raw.reshape((height, width, channels)) if channels > 1
                else raw.reshape((height, width)))
+        if dtype == np.uint16:
+            # 16 位降到 8 位：视觉算法只需要 8 位，且要保住暗部细节，
+            # 直接右移 8 位会把弱信号全抹平，所以按实际动态范围拉伸
+            hi = int(img.max())
+            img = ((img.astype(np.float32) / max(hi, 1)) * 255).astype(np.uint8) \
+                if hi > 0 else img.astype(np.uint8)
+        self.last_stats = (int(img.min()), int(img.max()), float(img.mean()))
         if channels == 1:
             # 契约要求 BGR：黑白（200M）转三通道，下游不用分情况
             img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
@@ -278,4 +341,6 @@ class QHYCamera(CameraBase):
         return {"driver": "qhy", "model": self._model,
                 "width": self._size[0], "height": self._size[1],
                 "exposure_ms": self._exposure_ms, "gain": self._gain,
-                "binning": self._binning}
+                "binning": self._binning,
+                "pixel_min": self.last_stats[0], "pixel_max": self.last_stats[1],
+                "pixel_mean": round(self.last_stats[2], 1)}

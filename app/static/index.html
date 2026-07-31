@@ -256,6 +256,7 @@ dialog .dfoot{padding:12px 18px 16px;display:flex;gap:9px;justify-content:flex-e
         <div class="frow" style="grid-template-columns:1fr auto">
           <select id="sel-port" aria-label="串口"><option value="">扫描串口 …</option></select>
           <button class="btn" id="b-mount">连接</button>
+          <button class="btn" id="b-mount-off" style="display:none">断开</button>
         </div>
         <div id="mountinfo" style="font:11.5px/1.7 var(--mono);color:var(--faint)"></div>
       </div>
@@ -275,6 +276,7 @@ dialog .dfoot{padding:12px 18px 16px;display:flex;gap:9px;justify-content:flex-e
         <div class="frow" style="grid-template-columns:1fr auto">
           <select id="sel-cam" aria-label="摄像头"><option value="">扫描摄像头 …</option></select>
           <button class="btn" id="b-cam">开启</button>
+          <button class="btn" id="b-cam-off" style="display:none">关闭</button>
         </div>
       </div>
 
@@ -476,6 +478,17 @@ function showMountHelp(reason){
 $("dlg-mount-close").onclick=()=>$("dlg-mount").close();
 $("dlg-mount-retry").onclick=()=>{ $("dlg-mount").close(); $("b-mount").click(); };
 
+$("b-mount-off").onclick=async()=>{
+  try{ const d=await act("/api/mount/disconnect"); say(d.message||"基座已断开。"); }
+  catch(err){ say("断开失败："+err.message,true); }
+};
+$("b-cam-off").onclick=async()=>{
+  try{
+    const d=await act("/api/camera/close");
+    haveFeed=false; $("feed").removeAttribute("src");
+    say(d.message||"画面源已关闭。");
+  }catch(err){ say("关闭失败："+err.message,true); }
+};
 $("b-cam").onclick=async()=>{
   const v=$("sel-cam").value;
   const btn=$("b-cam"); btn.disabled=true;
@@ -533,6 +546,11 @@ async function poll(){
     setChip("ch-mount", s.mount_connected?"基座 已连接":"基座 未连接",
             s.mount_connected?"on":"");
     setChip("ch-cam", s.camera_opened?"相机 已开启":"相机 未开启", s.camera_opened?"on":"");
+    // 连接/断开 成对切换：连上了就只显示断开，反之亦然
+    $("b-mount").style.display     = s.mount_connected?"none":"";
+    $("b-mount-off").style.display = s.mount_connected?"":"none";
+    $("b-cam").style.display       = s.camera_opened?"none":"";
+    $("b-cam-off").style.display   = s.camera_opened?"":"none";
     setChip("ch-calib", s.calibrated?"已标定":"未标定", s.calibrated?"on":"warn");
     setChip("ch-state", ST_NAME[s.state]||s.state,
             s.state==="tracking"?"cy":(s.state==="lost"?"err":""));
