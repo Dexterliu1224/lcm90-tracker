@@ -21,6 +21,7 @@ import sys
 import threading
 import time
 import webbrowser
+from typing import Optional
 
 logger = logging.getLogger("serve")
 
@@ -116,19 +117,91 @@ def _check_webview() -> int:
     """自检 WebView 组件是否齐全。CI 拿它验证打包结果 ——
     GUI 窗口在无头环境里开不出来，但「模块能不能导入」正是
     PyInstaller 最容易漏掉的东西，而这一项测得到。"""
+    native = False
     try:
         import webview  # noqa: F401
+        print("OK pywebview 可导入")
+        native = True
     except Exception as exc:
-        print("x WebView 组件不可用：%s" % exc)
-        return 1
-    print("OK WebView 组件已就绪（pywebview 可导入）")
-    if sys.platform == "win32":
+        print("!  pywebview 不可用：%s" % exc)
+
+    if native and sys.platform == "win32":
+        # 光 import webview 不够：真正的失败点在 winforms 后端 import clr，
+        # 而 pythonnet 的 Python.Runtime.dll 在 PyInstaller 下经常解析不了。
+        # 这里必须把它真的加载一遍，否则 --check 会给出虚假的通过。
         try:
-            import clr  # noqa: F401  pythonnet，EdgeChromium 后端要用
-            print("OK pythonnet 已就绪（Edge WebView2 后端）")
+            import clr  # noqa: F401
+            print("OK pythonnet/clr 已就绪（原生窗口可用）")
         except Exception as exc:
-            print("!  pythonnet 不可用：%s —— 窗口模式会退回浏览器" % exc)
+            native = False
+            print("!  pythonnet/clr 加载失败：%s" % exc)
+
+    browser = _find_browser()
+    if browser:
+        print("OK 应用模式窗口可用：%s" % browser)
+    else:
+        print("!  没找到 Edge/Chrome，应用模式窗口不可用")
+
+    if not native and not browser:
+        print("x 两种独立窗口都用不了，只能退回普通浏览器")
+        return 1
     return 0
+
+
+#: Edge / Chrome 的常见安装位置。用「应用模式」开窗是 pywebview 之外
+#: 最可靠的一条路：Windows 一定有 Edge，而且完全不碰 .NET。
+_BROWSER_CANDIDATES = (
+    r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+    r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+    r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+    r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+)
+
+
+def _find_browser() -> Optional[str]:
+    import shutil
+    for path in _BROWSER_CANDIDATES:
+        if os.path.exists(path):
+            return path
+    for name in ("msedge", "chrome", "chromium", "brave"):
+        found = shutil.which(name)
+        if found:
+            return found
+    return None
+
+
+def _open_app_window(url: str, profile_dir: str) -> bool:
+    """用 Edge/Chrome 的 --app 模式开一个独立窗口。
+
+    看起来就是个桌面程序：没有地址栏、没有标签页、没有书签栏，任务栏里
+    是独立图标。相比 pywebview 的好处是**完全不依赖 .NET/pythonnet** ——
+    后者在 PyInstaller 下极易打包失败（Python.Runtime.dll 解析不了），
+    而 Windows 上 Edge 是必装组件。
+
+    --user-data-dir 必须给一个独立目录：不给的话，如果用户已经开着 Edge，
+    新进程会把请求转交给现有实例然后**立刻退出**，我们就会误以为窗口关了。
+    """
+    exe = _find_browser()
+    if not exe:
+        return False
+    try:
+        os.makedirs(profile_dir, exist_ok=True)
+    except OSError:
+        pass
+    args = [exe, "--app=%s" % url,
+            "--user-data-dir=%s" % profile_dir,
+            "--no-first-run", "--no-default-browser-check",
+            "--disable-features=Translate,AutofillServerCommunication",
+            "--window-size=1440,920"]
+    try:
+        import subprocess
+        logger.info("用应用模式打开窗口：%s", exe)
+        proc = subprocess.Popen(args)
+        proc.wait()          # 阻塞到用户关掉窗口
+        return True
+    except Exception:
+        logger.exception("应用模式开窗失败")
+        return False
 
 
 def _msgbox(title: str, text: str) -> None:
@@ -280,17 +353,23 @@ def main() -> int:
 
     opened = False
     if windowed:
+        # 首选 pywebview 的原生窗口；它依赖 .NET/pythonnet，打包后不一定能用。
         opened = _open_window(url, _on_closed)
         if not opened:
-            print("    已改用浏览器打开。下次也可以直接加 --browser 参数。")
+            # 次选：Edge/Chrome 的应用模式。外观同样是独立窗口，
+            # 而且不碰 .NET，Windows 上几乎不可能失败。
+            print("    改用应用模式窗口（Edge/Chrome）。")
+            opened = _open_app_window(url, os.path.join(root, "data",
+                                                        "window-profile"))
+            if opened:
+                _on_closed()      # 窗口已关，通知收尾
+        if not opened:
+            print("    连应用模式也起不来，已改用普通浏览器。")
             # 打包版没有控制台，上面这句只会进 app.log。用户面对的是一个
             # 没有任何界面、也不知道怎么关掉的后台进程 —— 必须弹窗告诉他。
             _msgbox("LCM90 视觉跟踪台",
-                    "打不开程序窗口，已改用浏览器显示界面。\n\n"
-                    "这台电脑可能缺少 Microsoft Edge WebView2 运行时，"
-                    "装一次就能恢复成独立窗口：\n"
-                    "https://go.microsoft.com/fwlink/p/?LinkId=2124703\n\n"
-                    "现在要退出程序，请关掉浏览器页面后，"
+                    "打不开独立窗口，已改用浏览器显示界面。\n\n"
+                    "软件功能不受影响。要退出程序，请关掉浏览器页面后，"
                     "在任务管理器里结束 lcm90-tracker。")
 
     if not opened:

@@ -60,6 +60,8 @@ jobs:
           --windowed
           --name lcm90-tracker
           --collect-all webview
+          --collect-all pythonnet
+          --collect-all clr_loader
           --hidden-import clr
           --add-data "app/static/index.html;app/static"
           --add-data "app/static/login.html;app/static"
