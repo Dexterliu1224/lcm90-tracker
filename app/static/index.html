@@ -456,30 +456,12 @@ dialog .dfoot{padding:12px 18px 16px;display:flex;gap:9px;justify-content:flex-e
 <dialog id="dlg-cloud">
   <div class="dhead">云端同步</div>
   <div class="dbody">
-    <p class="dnote" style="margin-top:0">
-      填好之后，录像可以用「上传云端」按钮备份到你自己的对象存储。<br>
-      支持阿里云 OSS、腾讯云 COS、MinIO、AWS S3。</p>
-    <div class="ffield" style="margin-top:14px">
-      <label><input type="checkbox" id="cl-on" style="width:auto;margin-right:7px">
-        启用云端同步</label>
-    </div>
-    <div class="ffield"><label for="cl-ep">服务地址 endpoint</label>
-      <input id="cl-ep" placeholder="https://oss-cn-beijing.aliyuncs.com" spellcheck="false"></div>
-    <div class="ffield"><label for="cl-bk">存储桶 bucket</label>
-      <input id="cl-bk" placeholder="my-telescope" spellcheck="false"></div>
-    <div class="ffield"><label for="cl-ak">AccessKey ID</label>
-      <input id="cl-ak" spellcheck="false"></div>
-    <div class="ffield"><label for="cl-sk">AccessKey Secret</label>
-      <input id="cl-sk" type="password" placeholder="留空表示不修改"></div>
+    <div id="cl-state"></div>
     <p class="dnote" id="cl-msg"></p>
-    <p class="dnote" style="color:#c8922a">
-      请用<b>权限最小化的子账号</b>密钥，只给这一个桶的读写权限。
-      密钥保存在本机 <code>data\cloud.json</code>。</p>
   </div>
   <div class="dfoot">
     <button class="btn" id="cl-close">关闭</button>
     <button class="btn" id="cl-test">测试连接</button>
-    <button class="btn primary" id="cl-save">保存</button>
   </div>
 </dialog>
 
@@ -782,33 +764,35 @@ $("b-cloud").onclick=async()=>{
   setNote("cl-msg","");
   try{
     const d=await api("/api/cloud");
-    const c=d.config||{};
-    $("cl-on").checked=!!c.enabled; $("cl-ep").value=c.endpoint||"";
-    $("cl-bk").value=c.bucket||"";  $("cl-rg").value=c.region||"";
-    $("cl-ak").value=c.access_key||""; $("cl-sk").value="";
+    const c=d.config||{}, q=d.queue||{};
+    let h;
+    if(!c.enabled||!c.endpoint){
+      h="<p class='dnote' style='margin-top:0'>云端同步<b>未配置</b>。</p>"+
+        "<p class='dnote'>把程序目录里的 <code>cloud.json.模板</code> 按说明填好，"+
+        "另存为 <code>data\cloud.json</code>，重启软件即可。<br>"+
+        "填一次就行，以后换电脑把这个文件拷过去。</p>";
+    }else{
+      h="<table class='utab'><tbody>"+
+        "<tr><td>状态</td><td>已配置</td></tr>"+
+        "<tr><td>服务地址</td><td>"+c.endpoint+"</td></tr>"+
+        "<tr><td>存储桶</td><td>"+c.bucket+"</td></tr>"+
+        "<tr><td>AccessKey</td><td>"+c.access_key+"</td></tr>"+
+        "<tr><td>待上传</td><td>"+(q.pending||0)+" 个"+
+          (q.pending_mb?"（"+q.pending_mb+" MB）":"")+"</td></tr>"+
+        "</tbody></table>"+
+        "<p class='dnote'>录像不会自动上传，点主界面的「上传云端」才传。</p>";
+      if(q.last_error) h+="<p class='dnote err'>上次出错："+q.last_error+"</p>";
+    }
+    $("cl-state").innerHTML=h;
     $("dlg-cloud").showModal();
-  }catch(err){ say("打不开云端设置："+err.message,true); }
+  }catch(err){ say("打不开云端信息："+err.message,true); }
 };
 $("cl-close").onclick=()=>$("dlg-cloud").close();
-function cloudPayload(){
-  return {enabled:$("cl-on").checked, endpoint:$("cl-ep").value.trim(),
-    bucket:$("cl-bk").value.trim(), access_key:$("cl-ak").value.trim(),
-    secret_key:$("cl-sk").value};
-}
-$("cl-save").onclick=async()=>{
-  const b=$("cl-save"); b.disabled=true;
-  try{ const d=await api("/api/cloud",cloudPayload()); setNote("cl-msg",d.message,"ok"); }
-  catch(err){ setNote("cl-msg",err.message,"err"); }
-  finally{ b.disabled=false; }
-};
 $("cl-test").onclick=async()=>{
   const b=$("cl-test"); b.disabled=true;
   setNote("cl-msg","正在测试 …");
-  try{
-    await api("/api/cloud",cloudPayload());          // 先存再测，否则测的是旧配置
-    const d=await act("/api/cloud/test");
-    setNote("cl-msg",d.message,"ok");
-  }catch(err){ setNote("cl-msg",err.message,"err"); }
+  try{ const d=await act("/api/cloud/test"); setNote("cl-msg",d.message,"ok"); }
+  catch(err){ setNote("cl-msg",err.message,"err"); }
   finally{ b.disabled=false; }
 };
 function renderCloud(c){

@@ -82,6 +82,11 @@ class CloudConfig:
 
     @staticmethod
     def load(path: str) -> "CloudConfig":
+        """读配置。环境变量优先于文件 —— 这样打包/部署时可以注入，
+        而不必把密钥写进任何跟着代码走的文件里。"""
+        cfg = CloudConfig._from_env()
+        if cfg is not None:
+            return cfg
         if not path or not os.path.exists(path):
             return CloudConfig()
         try:
@@ -95,6 +100,20 @@ class CloudConfig:
         except Exception:
             logger.exception("读取云端配置失败，按未配置处理：%s", path)
             return CloudConfig()
+
+    @staticmethod
+    def _from_env() -> Optional["CloudConfig"]:
+        ep = os.environ.get("LCM90_CLOUD_ENDPOINT", "").strip()
+        if not ep:
+            return None
+        cfg = CloudConfig(
+            enabled=True, endpoint=ep,
+            bucket=os.environ.get("LCM90_CLOUD_BUCKET", "").strip(),
+            access_key=os.environ.get("LCM90_CLOUD_KEY", "").strip(),
+            secret_key=os.environ.get("LCM90_CLOUD_SECRET", "").strip(),
+            region=os.environ.get("LCM90_CLOUD_REGION", "us-east-1").strip())
+        logger.info("云端配置来自环境变量")
+        return cfg
 
     def save(self, path: str) -> None:
         parent = os.path.dirname(path)

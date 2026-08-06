@@ -1,0 +1,23 @@
+说明：把下面花括号里的内容填好，另存为  data\cloud.json  放到程序目录的 data 文件夹里。
+      填一次即可，以后换电脑把这个文件拷过去就行，软件界面上不需要任何设置。
+
+【安全提醒】这个文件里有密钥，绝对不要放进 GitHub、不要随 exe 发给别人。
+            请用权限最小化的子账号密钥，只给这一个存储桶的读写权限。
+
+--------- 从下一行开始复制 ---------
+{
+  "enabled": true,
+  "endpoint": "https://oss-cn-beijing.aliyuncs.com",
+  "bucket": "填你的存储桶名字",
+  "access_key": "填 AccessKey ID",
+  "secret_key": "填 AccessKey Secret",
+  "region": "us-east-1"
+}
+--------- 到上一行结束 ---------
+
+endpoint 怎么填：
+  阿里云 OSS   https://oss-cn-beijing.aliyuncs.com   （把 cn-beijing 换成你的地域）
+  腾讯云 COS   https://cos.ap-beijing.myqcloud.com   （把 ap-beijing 换成你的地域）
+  MinIO 自建   http://你的服务器IP:9000
+  AWS S3       https://s3.us-east-1.amazonaws.com
+region 一般保持 us-east-1 就行；只有 AWS 需要填成真实地域。

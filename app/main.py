@@ -399,42 +399,10 @@ def api_record_stop() -> Dict[str, Any]:
 
 
 # ================================================================ 云端
-class CloudCfgReq(BaseModel):
-    enabled: Optional[bool] = None
-    endpoint: Optional[str] = None
-    bucket: Optional[str] = None
-    region: Optional[str] = None
-    access_key: Optional[str] = None
-    secret_key: Optional[str] = None
-    prefix: Optional[str] = None
-    device_name: Optional[str] = None
-    upload_recordings: Optional[bool] = None
-    upload_calibration: Optional[bool] = None
-    sync_accounts: Optional[bool] = None
-
-
 @app.get("/api/cloud")
 def api_cloud_get(request: Request) -> Dict[str, Any]:
     _require_admin(request)
     return {"config": cloud_cfg.masked(), "queue": uploads.status()}
-
-
-@app.post("/api/cloud")
-def api_cloud_set(req: CloudCfgReq, request: Request) -> Dict[str, Any]:
-    _require_admin(request)
-    for name, val in req.dict(exclude_none=True).items():
-        # 密钥留空表示「不改」——界面上显示的是打码版，原样提交回来时
-        # 不能把真密钥覆盖成一串星号。
-        if name in ("access_key", "secret_key") and (not val or "*" in val):
-            continue
-        setattr(cloud_cfg, name, val)
-    try:
-        cloud_cfg.save(CLOUD_FILE)
-    except Exception as exc:
-        raise HTTPException(400, "保存云端配置失败：%s" % exc)
-    if cloud_cfg.enabled:
-        uploads.start()
-    return {"ok": True, "message": "云端配置已保存。", "config": cloud_cfg.masked()}
 
 
 @app.post("/api/cloud/test")
