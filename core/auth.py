@@ -63,6 +63,7 @@ class UserStore:
         self._path = path
         self._lock = threading.RLock()
         self._users: Dict[str, Dict[str, Any]] = {}
+        self._deleted: Dict[str, float] = {}     # 账号名 → 删除时刻（墓碑）
         self._load()
 
     # ---------------- 落盘 ----------------
@@ -78,6 +79,7 @@ class UserStore:
             if not isinstance(users, dict) or not users:
                 raise ValueError("users 段为空")
             self._users = users
+            self._deleted = dict(data.get("deleted") or {})
         except Exception:
             # 账号文件损坏时**不能**直接放行，也不能把人锁在门外：
             # 重建出厂账号并留下日志，管理员至少还能进得去。
@@ -109,7 +111,8 @@ class UserStore:
             # 账号文件会变成半截 JSON，下次启动谁都登不进去。
             tmp = self._path + ".tmp"
             with open(tmp, "w", encoding="utf-8") as fh:
-                json.dump({"version": 1, "users": self._users}, fh,
+                json.dump({"version": 1, "users": self._users,
+                           "deleted": self._deleted}, fh,
                           ensure_ascii=False, indent=2)
             os.replace(tmp, self._path)
         except Exception:
@@ -122,7 +125,9 @@ class UserStore:
         return {"algo": _ALGO, "iterations": _ITERATIONS,
                 "salt": salt.hex(), "hash": _hash_password(password, salt),
                 "role": role, "is_default_password": bool(is_default),
-                "created_at": time.time()}
+                # updated_at 是云端多设备合并的依据：同名账号谁的时间戳新用谁的。
+                # 少了它，两台设备各改各的时会互相覆盖。
+                "created_at": time.time(), "updated_at": time.time()}
 
     # ---------------- 查询 ----------------
 
@@ -198,7 +203,7 @@ class UserStore:
             salt = secrets.token_bytes(_SALT_BYTES)
             rec.update(algo=_ALGO, iterations=_ITERATIONS, salt=salt.hex(),
                        hash=_hash_password(new, salt),
-                       is_default_password=False)
+                       is_default_password=False, updated_at=time.time())
             self._save()
         logger.info("账号 %s 已修改密码", username)
 
@@ -211,6 +216,9 @@ class UserStore:
             if username in self._users:
                 raise AuthError("用户名「%s」已经存在。" % username)
             self._users[username] = self._make_record(password, role)
+            # 清掉墓碑：删过 teacher 又重建 teacher，墓碑还留着的话，
+            # 下次云端同步会把刚建好的账号又删掉。
+            self._deleted.pop(username, None)
             self._save()
         logger.info("新建账号 %s（%s）", username, role)
 
@@ -224,9 +232,29 @@ class UserStore:
             salt = secrets.token_bytes(_SALT_BYTES)
             rec.update(algo=_ALGO, iterations=_ITERATIONS, salt=salt.hex(),
                        hash=_hash_password(password, salt),
-                       is_default_password=False)
+                       is_default_password=False, updated_at=time.time())
             self._save()
         logger.info("管理员重置了账号 %s 的密码", username)
+
+    def export_for_sync(self) -> Dict[str, Any]:
+        """导出给云端的完整账号数据（含散列，但本来就不是明文）。"""
+        with self._lock:
+            return {"version": 1, "users": dict(self._users),
+                    "deleted": dict(self._deleted)}
+
+    def import_merged(self, merged: Dict[str, Any]) -> None:
+        """用合并结果覆盖本地。调用方负责先做 merge，这里只落地。"""
+        users = merged.get("users") or {}
+        if not isinstance(users, dict) or not users:
+            raise AuthError("合并结果为空，拒绝覆盖本地账号。")
+        if not any(u.get("role") == "admin" for u in users.values()):
+            # 同步进来一份没有管理员的数据 = 从此没人能管账号
+            raise AuthError("合并结果里没有管理员，拒绝应用。")
+        with self._lock:
+            self._users = dict(users)
+            self._deleted = dict(merged.get("deleted") or {})
+            self._save()
+        logger.info("已应用云端账号合并结果，共 %d 个账号", len(users))
 
     def delete_user(self, username: str) -> None:
         with self._lock:
@@ -240,6 +268,8 @@ class UserStore:
                     raise AuthError("这是最后一个管理员，删了就没人能管账号了。"
                                     "请先新建另一个管理员。")
             del self._users[username]
+            # 记一笔墓碑：只是本地删掉的话，下次从云端同步又会被拉回来
+            self._deleted[username] = time.time()
             self._save()
         logger.info("删除账号 %s", username)
 

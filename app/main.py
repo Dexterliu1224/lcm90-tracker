@@ -80,6 +80,39 @@ users = UserStore(_under_root(str(_auth_cfg.get("file", "data/users.json"))))
 sessions = SessionStore()
 SESSION_COOKIE = "lcm90_session"
 
+# ---- 云端同步（离线优先：没配置或连不上时，一切照常本地运行）----
+from core.cloud import (CloudAccounts, CloudConfig, CloudError, S3Client,
+                        UploadQueue)
+
+CLOUD_FILE = _under_root("data/cloud.json")
+cloud_cfg = CloudConfig.load(CLOUD_FILE)
+
+
+def _cloud_client() -> Optional[S3Client]:
+    """按当前配置造一个客户端；没启用/没配好就返回 None（不是报错）。
+    上传线程靠这个 None 判断「现在还不能传」，然后安静地等下一轮。"""
+    if not cloud_cfg.enabled:
+        return None
+    try:
+        return S3Client(cloud_cfg)
+    except CloudError:
+        return None
+
+
+def _device_tag() -> str:
+    import socket
+    return (cloud_cfg.device_name or socket.gethostname() or "device").strip()
+
+
+def _cloud_key(kind: str, filename: str) -> str:
+    return "%s/%s/%s/%s" % (cloud_cfg.prefix.strip("/"), _device_tag(),
+                            kind, filename)
+
+
+uploads = UploadQueue(_under_root("data/upload-queue.json"), _cloud_client)
+cloud_accounts = CloudAccounts(
+    _cloud_client, lambda: "%s/_shared/users.json" % cloud_cfg.prefix.strip("/"))
+
 _rec_cfg = dict(_CFG.get("recording", {}) or {})
 recorder = Recorder(_under_root(str(_rec_cfg.get("dir", "data/recordings"))),
                     fps=float(_rec_cfg.get("fps", 15)),
@@ -359,9 +392,102 @@ def api_record_stop() -> Dict[str, Any]:
     st = recorder.stop()
     if not st.get("file"):
         return {"ok": True, "message": "当前没有在录像。", "record": st}
-    return {"ok": True,
-            "message": "录像已保存：%s（%.1f MB）" % (st["file"], st["size_mb"]),
-            "record": st}
+    msg = "录像已保存：%s（%.1f MB）" % (st["file"], st["size_mb"])
+    # 录完就排队上传。**只是入队**，真正的上传在后台慢慢做，
+    # 断网也无所谓 —— 队列落盘，回到有网的地方会自己补传。
+    if cloud_cfg.enabled and cloud_cfg.upload_recordings and st.get("path"):
+        if uploads.enqueue(st["path"], _cloud_key("recordings", st["file"])):
+            msg += "，已排队上传到云端"
+    return {"ok": True, "message": msg, "record": st}
+
+
+# ================================================================ 云端
+class CloudCfgReq(BaseModel):
+    enabled: Optional[bool] = None
+    endpoint: Optional[str] = None
+    bucket: Optional[str] = None
+    region: Optional[str] = None
+    access_key: Optional[str] = None
+    secret_key: Optional[str] = None
+    prefix: Optional[str] = None
+    device_name: Optional[str] = None
+    upload_recordings: Optional[bool] = None
+    upload_calibration: Optional[bool] = None
+    sync_accounts: Optional[bool] = None
+
+
+@app.get("/api/cloud")
+def api_cloud_get(request: Request) -> Dict[str, Any]:
+    _require_admin(request)
+    return {"config": cloud_cfg.masked(), "queue": uploads.status()}
+
+
+@app.post("/api/cloud")
+def api_cloud_set(req: CloudCfgReq, request: Request) -> Dict[str, Any]:
+    _require_admin(request)
+    for name, val in req.dict(exclude_none=True).items():
+        # 密钥留空表示「不改」——界面上显示的是打码版，原样提交回来时
+        # 不能把真密钥覆盖成一串星号。
+        if name in ("access_key", "secret_key") and (not val or "*" in val):
+            continue
+        setattr(cloud_cfg, name, val)
+    try:
+        cloud_cfg.save(CLOUD_FILE)
+    except Exception as exc:
+        raise HTTPException(400, "保存云端配置失败：%s" % exc)
+    if cloud_cfg.enabled:
+        uploads.start()
+    return {"ok": True, "message": "云端配置已保存。", "config": cloud_cfg.masked()}
+
+
+@app.post("/api/cloud/test")
+def api_cloud_test(request: Request) -> Dict[str, Any]:
+    _require_admin(request)
+    client = _cloud_client()
+    if client is None:
+        raise HTTPException(400, "云端未启用或配置不完整。")
+    try:
+        return {"ok": True, "message": client.ping()}
+    except CloudError as exc:
+        raise HTTPException(400, str(exc))
+
+
+@app.post("/api/cloud/sync")
+def api_cloud_sync(request: Request) -> Dict[str, Any]:
+    """立即同步：把待传的重试一遍，并双向同步账号。"""
+    _require_admin(request)
+    uploads.retry_now()
+    notes = []
+    if cloud_cfg.sync_accounts:
+        try:
+            notes.append(_sync_accounts_once())
+        except CloudError as exc:
+            notes.append("账号同步失败：%s" % exc)
+    st = uploads.status()
+    msg = "已开始同步：待传 %d 个文件" % st["pending"]
+    if notes:
+        msg += "。" + "；".join(notes)
+    return {"ok": True, "message": msg, "queue": st}
+
+
+def _sync_accounts_once() -> str:
+    """把云端账号拉下来合并，再把合并结果推回去。"""
+    remote = cloud_accounts.pull()
+    local = users.export_for_sync()
+    if remote is None:
+        cloud_accounts.push(local)
+        return "云端还没有账号文件，已用本地的初始化"
+    merged, changed = CloudAccounts.merge(local, remote)
+    if changed:
+        try:
+            users.import_merged(merged)
+        except AuthError as exc:
+            return "云端账号未应用：%s" % exc
+        # 密码可能在别的设备上被改过，本机的旧会话必须作废
+        for name in list((merged.get("users") or {})):
+            sessions.drop_user(name)
+    cloud_accounts.push(users.export_for_sync())
+    return "账号已同步" + ("（本地有更新）" if changed else "")
 
 
 @app.get("/video")
@@ -546,6 +672,7 @@ def api_nudge(req: NudgeReq) -> Dict[str, Any]:
 def api_status(request: Request) -> Dict[str, Any]:
     st = session.status()
     st["record"] = recorder.status()
+    st["cloud"] = {"enabled": bool(cloud_cfg.enabled), **uploads.status()}
     username = _current_user(request)
     st["user"] = {"username": username, "role": users.role_of(username),
                   "is_default_password": users.uses_default_password(username)}
@@ -564,6 +691,10 @@ def shutdown_now() -> None:
     _shutdown_done.set()
     _stream_stop.set()          # 先放掉视频流，否则谁都等不到它
     try:
+        uploads.shutdown()      # 停上传线程；没传完的留在队列里，下次接着传
+    except Exception:
+        log.exception("关闭上传队列失败")
+    try:
         recorder.shutdown()     # 先收录像：没 release 就是个播不了的半截文件
     except Exception:
         log.exception("关闭录像失败")
@@ -571,6 +702,22 @@ def shutdown_now() -> None:
         session.shutdown()      # 里面会把基座速率清零并断开
     except Exception:
         log.exception("关闭跟踪会话失败")
+
+
+@app.on_event("startup")
+def _startup():
+    if not cloud_cfg.enabled:
+        return
+    uploads.start()
+    if cloud_cfg.sync_accounts:
+        # 放后台线程：云端连不上时，这一步会卡住整个程序的启动
+        def _first_sync():
+            try:
+                log.info("首次账号同步：%s", _sync_accounts_once())
+            except Exception:
+                log.warning("首次账号同步失败，先用本地账号", exc_info=True)
+        threading.Thread(target=_first_sync, name="cloud-first-sync",
+                         daemon=True).start()
 
 
 @app.on_event("shutdown")

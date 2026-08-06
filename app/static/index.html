@@ -295,11 +295,13 @@ dialog .dfoot{padding:12px 18px 16px;display:flex;gap:9px;justify-content:flex-e
       <span class="chip" id="ch-calib">未标定</span>
       <span class="chip" id="ch-state">待机</span>
       <span class="chip" id="ch-rec" style="display:none"></span>
+      <span class="chip" id="ch-cloud" style="display:none"></span>
     </div>
     <div class="userbox">
       <span class="who" id="who">—</span>
       <button class="lnk" id="b-pwd">修改密码</button>
       <button class="lnk" id="b-users" style="display:none">账号管理</button>
+      <button class="lnk" id="b-cloud" style="display:none">云端同步</button>
       <!-- 必须写全「退出登录」：现在是桌面窗口程序，光写「退出」会被
            理解成关闭软件，点完却只是回到登录页，用户会以为没反应 -->
       <button class="lnk" id="b-logout">退出登录</button>
@@ -446,6 +448,54 @@ dialog .dfoot{padding:12px 18px 16px;display:flex;gap:9px;justify-content:flex-e
   <div class="dfoot">
     <button class="btn" id="pw-cancel">取消</button>
     <button class="btn primary" id="pw-ok">确认修改</button>
+  </div>
+</dialog>
+
+<!-- 云端同步（仅管理员） -->
+<dialog id="dlg-cloud">
+  <div class="dhead">云端同步</div>
+  <div class="dbody">
+    <p class="dnote" style="margin-top:0">
+      录像和标定会自动传到你自己的对象存储（阿里云 OSS、腾讯云 COS、MinIO 等）。<br>
+      <b>断网也能正常用</b> —— 传不上去就先排队，有网了自动补传。</p>
+    <div class="ffield" style="margin-top:14px">
+      <label><input type="checkbox" id="cl-on" style="width:auto;margin-right:7px">
+        启用云端同步</label>
+    </div>
+    <div class="ffield"><label for="cl-ep">服务地址 endpoint</label>
+      <input id="cl-ep" placeholder="https://oss-cn-beijing.aliyuncs.com" spellcheck="false"></div>
+    <div class="frow" style="grid-template-columns:1fr 1fr;gap:9px">
+      <div class="ffield"><label for="cl-bk">存储桶 bucket</label>
+        <input id="cl-bk" spellcheck="false"></div>
+      <div class="ffield"><label for="cl-rg">区域 region</label>
+        <input id="cl-rg" placeholder="oss-cn-beijing" spellcheck="false"></div>
+    </div>
+    <div class="ffield"><label for="cl-ak">AccessKey ID</label>
+      <input id="cl-ak" spellcheck="false"></div>
+    <div class="ffield"><label for="cl-sk">AccessKey Secret</label>
+      <input id="cl-sk" type="password" placeholder="留空表示不修改"></div>
+    <div class="frow" style="grid-template-columns:1fr 1fr;gap:9px">
+      <div class="ffield"><label for="cl-px">存放路径前缀</label>
+        <input id="cl-px" placeholder="lcm90" spellcheck="false"></div>
+      <div class="ffield"><label for="cl-dev">本机名称</label>
+        <input id="cl-dev" placeholder="留空用电脑名" spellcheck="false"></div>
+    </div>
+    <div class="ffield">
+      <label><input type="checkbox" id="cl-rec" style="width:auto;margin-right:7px">自动上传录像</label>
+    </div>
+    <div class="ffield">
+      <label><input type="checkbox" id="cl-acc" style="width:auto;margin-right:7px">
+        账号与云端同步（多台设备共用一套账号密码）</label>
+    </div>
+    <p class="dnote" id="cl-msg"></p>
+    <p class="dnote" style="color:#c8922a">
+      安全提醒：请用<b>权限最小化的子账号</b>密钥，只给这一个桶的读写权限。
+      密钥保存在本机 <code>data\cloud.json</code>，不会进配置文件。</p>
+  </div>
+  <div class="dfoot">
+    <button class="btn" id="cl-close">关闭</button>
+    <button class="btn" id="cl-test">测试连接</button>
+    <button class="btn primary" id="cl-save">保存</button>
   </div>
 </dialog>
 
@@ -736,6 +786,61 @@ async function pickStar(s){
   }catch(err){ say("选中失败："+err.message,true); }
 }
 
+/* ── 云端同步 ─────────────────────────────────────────── */
+$("b-cloud").onclick=async()=>{
+  setNote("cl-msg","");
+  try{
+    const d=await api("/api/cloud");
+    const c=d.config||{};
+    $("cl-on").checked=!!c.enabled; $("cl-ep").value=c.endpoint||"";
+    $("cl-bk").value=c.bucket||"";  $("cl-rg").value=c.region||"";
+    $("cl-ak").value=c.access_key||""; $("cl-sk").value="";
+    $("cl-px").value=c.prefix||"lcm90"; $("cl-dev").value=c.device_name||"";
+    $("cl-rec").checked=c.upload_recordings!==false;
+    $("cl-acc").checked=!!c.sync_accounts;
+    $("dlg-cloud").showModal();
+  }catch(err){ say("打不开云端设置："+err.message,true); }
+};
+$("cl-close").onclick=()=>$("dlg-cloud").close();
+function cloudPayload(){
+  return {enabled:$("cl-on").checked, endpoint:$("cl-ep").value.trim(),
+    bucket:$("cl-bk").value.trim(), region:$("cl-rg").value.trim()||"us-east-1",
+    access_key:$("cl-ak").value.trim(), secret_key:$("cl-sk").value,
+    prefix:$("cl-px").value.trim()||"lcm90", device_name:$("cl-dev").value.trim(),
+    upload_recordings:$("cl-rec").checked, sync_accounts:$("cl-acc").checked};
+}
+$("cl-save").onclick=async()=>{
+  const b=$("cl-save"); b.disabled=true;
+  try{ const d=await api("/api/cloud",cloudPayload()); setNote("cl-msg",d.message,"ok"); }
+  catch(err){ setNote("cl-msg",err.message,"err"); }
+  finally{ b.disabled=false; }
+};
+$("cl-test").onclick=async()=>{
+  const b=$("cl-test"); b.disabled=true;
+  setNote("cl-msg","正在测试 …");
+  try{
+    await api("/api/cloud",cloudPayload());          // 先存再测，否则测的是旧配置
+    const d=await act("/api/cloud/test");
+    setNote("cl-msg",d.message,"ok");
+  }catch(err){ setNote("cl-msg",err.message,"err"); }
+  finally{ b.disabled=false; }
+};
+function renderCloud(c){
+  const chip=$("ch-cloud");
+  if(!c||!c.enabled){ chip.style.display="none"; return; }
+  chip.style.display="";
+  if(c.uploading){
+    chip.textContent="↑ 上传中 "+Math.round((c.progress||0)*100)+"%";
+    chip.className="chip cy";
+  }else if(c.pending>0){
+    chip.textContent="↑ 待传 "+c.pending+" 个"+(c.pending_mb?"（"+c.pending_mb+"MB）":"");
+    chip.className="chip warn";
+  }else{
+    chip.textContent="云端 已同步"; chip.className="chip on";
+  }
+  chip.title=c.last_error?("上次出错："+c.last_error):"";
+}
+
 /* ── 录制 ─────────────────────────────────────────────── */
 let recOn=false, recBusy=false;
 $("b-rec").onclick=async()=>{
@@ -921,6 +1026,7 @@ async function poll(){
     $("b-cam").style.display       = s.camera_opened?"none":"";
     $("b-cam-off").style.display   = s.camera_opened?"":"none";
     renderRec(s.record, s.camera_opened);
+    renderCloud(s.cloud);
     $("b-stars").disabled=!s.camera_opened;
     // 关画面就收起叠加层。**不能**用 $("b-stars").click()：上一行刚把它
     // 置成 disabled，而按 HTML 规范对 disabled 控件调 click() 是空操作 ——
@@ -931,6 +1037,7 @@ async function poll(){
       $("who").textContent=s.user.username+
         (s.user.role==="admin"?" · 管理员":"");
       $("b-users").style.display = s.user.role==="admin"?"":"none";
+      $("b-cloud").style.display = s.user.role==="admin"?"":"none";
       $("pwdwarn").classList.toggle("show", !!s.user.is_default_password);
     }
     setChip("ch-calib", s.calibrated?"已标定":"未标定", s.calibrated?"on":"warn");
