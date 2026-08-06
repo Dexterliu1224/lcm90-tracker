@@ -393,11 +393,8 @@ def api_record_stop() -> Dict[str, Any]:
     if not st.get("file"):
         return {"ok": True, "message": "当前没有在录像。", "record": st}
     msg = "录像已保存：%s（%.1f MB）" % (st["file"], st["size_mb"])
-    # 录完就排队上传。**只是入队**，真正的上传在后台慢慢做，
-    # 断网也无所谓 —— 队列落盘，回到有网的地方会自己补传。
-    if cloud_cfg.enabled and cloud_cfg.upload_recordings and st.get("path"):
-        if uploads.enqueue(st["path"], _cloud_key("recordings", st["file"])):
-            msg += "，已排队上传到云端"
+    if cloud_cfg.enabled:
+        msg += "。要备份到云端就点「上传云端」"
     return {"ok": True, "message": msg, "record": st}
 
 
@@ -450,6 +447,32 @@ def api_cloud_test(request: Request) -> Dict[str, Any]:
         return {"ok": True, "message": client.ping()}
     except CloudError as exc:
         raise HTTPException(400, str(exc))
+
+
+@app.post("/api/cloud/upload")
+def api_cloud_upload(request: Request) -> Dict[str, Any]:
+    """把本地还没传过的录像排队上传。**只有点了这个按钮才会上传。**"""
+    _require_admin(request)
+    if not cloud_cfg.enabled:
+        raise HTTPException(400, "云端同步还没启用，请先在「云端同步」里配置。")
+    if _cloud_client() is None:
+        raise HTTPException(400, "云端配置不完整，请先填好并测试连接。")
+    rec_dir = recorder._outdir if hasattr(recorder, "_outdir") else ""
+    added = 0
+    if rec_dir and os.path.isdir(rec_dir):
+        for name in sorted(os.listdir(rec_dir)):
+            if not name.lower().endswith((".mp4", ".avi")):
+                continue
+            if uploads.enqueue(os.path.join(rec_dir, name),
+                               _cloud_key("recordings", name)):
+                added += 1
+    uploads.start()
+    st = uploads.status()
+    if added == 0 and st["pending"] == 0:
+        return {"ok": True, "message": "没有需要上传的录像（都传过了）。", "queue": st}
+    return {"ok": True,
+            "message": "已开始上传：新增 %d 个，队列共 %d 个" % (added, st["pending"]),
+            "queue": st}
 
 
 @app.post("/api/cloud/sync")
@@ -708,7 +731,9 @@ def shutdown_now() -> None:
 def _startup():
     if not cloud_cfg.enabled:
         return
-    uploads.start()
+    # 上一次没传完的接着传；新录的要用户点「上传云端」才会加进来
+    if uploads.status()["pending"] > 0:
+        uploads.start()
     if cloud_cfg.sync_accounts:
         # 放后台线程：云端连不上时，这一步会卡住整个程序的启动
         def _first_sync():

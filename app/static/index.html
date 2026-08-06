@@ -341,6 +341,7 @@ dialog .dfoot{padding:12px 18px 16px;display:flex;gap:9px;justify-content:flex-e
             <span class="dot"></span><span id="rec-label">录制</span>
           </button>
           <button class="btn" id="b-stars" disabled>识别星点</button>
+          <button class="btn" id="b-upload" style="display:none">上传云端</button>
         </div>
         <div id="starinfo"></div>
         <div id="recinfo"></div>
@@ -456,41 +457,24 @@ dialog .dfoot{padding:12px 18px 16px;display:flex;gap:9px;justify-content:flex-e
   <div class="dhead">云端同步</div>
   <div class="dbody">
     <p class="dnote" style="margin-top:0">
-      录像和标定会自动传到你自己的对象存储（阿里云 OSS、腾讯云 COS、MinIO 等）。<br>
-      <b>断网也能正常用</b> —— 传不上去就先排队，有网了自动补传。</p>
+      填好之后，录像可以用「上传云端」按钮备份到你自己的对象存储。<br>
+      支持阿里云 OSS、腾讯云 COS、MinIO、AWS S3。</p>
     <div class="ffield" style="margin-top:14px">
       <label><input type="checkbox" id="cl-on" style="width:auto;margin-right:7px">
         启用云端同步</label>
     </div>
     <div class="ffield"><label for="cl-ep">服务地址 endpoint</label>
       <input id="cl-ep" placeholder="https://oss-cn-beijing.aliyuncs.com" spellcheck="false"></div>
-    <div class="frow" style="grid-template-columns:1fr 1fr;gap:9px">
-      <div class="ffield"><label for="cl-bk">存储桶 bucket</label>
-        <input id="cl-bk" spellcheck="false"></div>
-      <div class="ffield"><label for="cl-rg">区域 region</label>
-        <input id="cl-rg" placeholder="oss-cn-beijing" spellcheck="false"></div>
-    </div>
+    <div class="ffield"><label for="cl-bk">存储桶 bucket</label>
+      <input id="cl-bk" placeholder="my-telescope" spellcheck="false"></div>
     <div class="ffield"><label for="cl-ak">AccessKey ID</label>
       <input id="cl-ak" spellcheck="false"></div>
     <div class="ffield"><label for="cl-sk">AccessKey Secret</label>
       <input id="cl-sk" type="password" placeholder="留空表示不修改"></div>
-    <div class="frow" style="grid-template-columns:1fr 1fr;gap:9px">
-      <div class="ffield"><label for="cl-px">存放路径前缀</label>
-        <input id="cl-px" placeholder="lcm90" spellcheck="false"></div>
-      <div class="ffield"><label for="cl-dev">本机名称</label>
-        <input id="cl-dev" placeholder="留空用电脑名" spellcheck="false"></div>
-    </div>
-    <div class="ffield">
-      <label><input type="checkbox" id="cl-rec" style="width:auto;margin-right:7px">自动上传录像</label>
-    </div>
-    <div class="ffield">
-      <label><input type="checkbox" id="cl-acc" style="width:auto;margin-right:7px">
-        账号与云端同步（多台设备共用一套账号密码）</label>
-    </div>
     <p class="dnote" id="cl-msg"></p>
     <p class="dnote" style="color:#c8922a">
-      安全提醒：请用<b>权限最小化的子账号</b>密钥，只给这一个桶的读写权限。
-      密钥保存在本机 <code>data\cloud.json</code>，不会进配置文件。</p>
+      请用<b>权限最小化的子账号</b>密钥，只给这一个桶的读写权限。
+      密钥保存在本机 <code>data\cloud.json</code>。</p>
   </div>
   <div class="dfoot">
     <button class="btn" id="cl-close">关闭</button>
@@ -787,6 +771,13 @@ async function pickStar(s){
 }
 
 /* ── 云端同步 ─────────────────────────────────────────── */
+$("b-upload").onclick=async()=>{
+  const b=$("b-upload"); b.disabled=true;
+  say("正在检查要上传的录像 …");
+  try{ const d=await act("/api/cloud/upload"); say(d.message); }
+  catch(err){ say("上传失败："+err.message,true); }
+  finally{ b.disabled=false; }
+};
 $("b-cloud").onclick=async()=>{
   setNote("cl-msg","");
   try{
@@ -795,19 +786,14 @@ $("b-cloud").onclick=async()=>{
     $("cl-on").checked=!!c.enabled; $("cl-ep").value=c.endpoint||"";
     $("cl-bk").value=c.bucket||"";  $("cl-rg").value=c.region||"";
     $("cl-ak").value=c.access_key||""; $("cl-sk").value="";
-    $("cl-px").value=c.prefix||"lcm90"; $("cl-dev").value=c.device_name||"";
-    $("cl-rec").checked=c.upload_recordings!==false;
-    $("cl-acc").checked=!!c.sync_accounts;
     $("dlg-cloud").showModal();
   }catch(err){ say("打不开云端设置："+err.message,true); }
 };
 $("cl-close").onclick=()=>$("dlg-cloud").close();
 function cloudPayload(){
   return {enabled:$("cl-on").checked, endpoint:$("cl-ep").value.trim(),
-    bucket:$("cl-bk").value.trim(), region:$("cl-rg").value.trim()||"us-east-1",
-    access_key:$("cl-ak").value.trim(), secret_key:$("cl-sk").value,
-    prefix:$("cl-px").value.trim()||"lcm90", device_name:$("cl-dev").value.trim(),
-    upload_recordings:$("cl-rec").checked, sync_accounts:$("cl-acc").checked};
+    bucket:$("cl-bk").value.trim(), access_key:$("cl-ak").value.trim(),
+    secret_key:$("cl-sk").value};
 }
 $("cl-save").onclick=async()=>{
   const b=$("cl-save"); b.disabled=true;
@@ -827,7 +813,7 @@ $("cl-test").onclick=async()=>{
 };
 function renderCloud(c){
   const chip=$("ch-cloud");
-  if(!c||!c.enabled){ chip.style.display="none"; return; }
+  if(!c||!c.enabled){ chip.style.display="none"; $("b-upload").style.display="none"; return; }
   chip.style.display="";
   if(c.uploading){
     chip.textContent="↑ 上传中 "+Math.round((c.progress||0)*100)+"%";
@@ -839,6 +825,7 @@ function renderCloud(c){
     chip.textContent="云端 已同步"; chip.className="chip on";
   }
   chip.title=c.last_error?("上次出错："+c.last_error):"";
+  $("b-upload").style.display=c.enabled?"":"none";
 }
 
 /* ── 录制 ─────────────────────────────────────────────── */

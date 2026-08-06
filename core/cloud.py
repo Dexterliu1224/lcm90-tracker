@@ -356,6 +356,7 @@ class UploadQueue:
         self._make_client = client_factory
         self._lock = threading.RLock()
         self._items: List[QueueItem] = []
+        self._uploaded: set = set()      # 传成功过的 key，手动重复点不会再传一遍
         self._stop = threading.Event()
         self._wake = threading.Event()
         self._thread: Optional[threading.Thread] = None
@@ -380,6 +381,7 @@ class UploadQueue:
                         setattr(it, k, v)
                 if not it.done:
                     self._items.append(it)
+            self._uploaded = set(data.get("uploaded") or [])
         except Exception:
             logger.exception("读取上传队列失败，从空队列开始：%s", self._file)
 
@@ -392,7 +394,8 @@ class UploadQueue:
                 os.makedirs(parent, exist_ok=True)
             tmp = self._file + ".tmp"
             with open(tmp, "w", encoding="utf-8") as fh:
-                json.dump({"items": [i.to_dict() for i in self._items]}, fh,
+                json.dump({"items": [i.to_dict() for i in self._items],
+                           "uploaded": sorted(self._uploaded)}, fh,
                           ensure_ascii=False, indent=1)
             os.replace(tmp, self._file)
         except Exception:
@@ -404,6 +407,8 @@ class UploadQueue:
         if not path or not os.path.exists(path):
             return False
         with self._lock:
+            if key in self._uploaded:
+                return False       # 这个文件已经传上去了
             if any(i.path == path and not i.done for i in self._items):
                 return False       # 已经在队列里
             try:
@@ -416,6 +421,10 @@ class UploadQueue:
         logger.info("已加入上传队列：%s → %s", os.path.basename(path), key)
         self._wake.set()
         return True
+
+    def is_uploaded(self, key: str) -> bool:
+        with self._lock:
+            return key in self._uploaded
 
     def status(self) -> Dict[str, Any]:
         with self._lock:
@@ -550,6 +559,9 @@ class UploadQueue:
             self._items = [i for i in self._items if not i.done]
             self._save_locked()
         if ok:
+            with self._lock:
+                self._uploaded.add(item.key)
+                self._save_locked()
             self._last_ok_at = time.time()
             self._last_error = ""
 
