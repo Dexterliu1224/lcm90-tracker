@@ -44,7 +44,14 @@ _MIN_STEP_PX = 1.0
 _STEP_FRAC_OF_FRAME = 0.12     # 单步位移目标值：画面**短边**的 12%
 _STEP_FRAC_OF_MARGIN = 0.55    # 且不超过目标到最近边缘距离的 55%
 _STEP_MIN_DEG = 0.005          # 步长下限，再小基座的齿隙就淹没信号了
+#: 步长上限。广角相机上自适应会把步长顶得很大，要有个刹车 ——
+#: 经纬仪单步转十几度既慢又容易撞限位。
+_STEP_MAX_DEG = 8.0
+#: 单步位移低于这个像素数就认为信噪比不够，下一步直接按比例放大重来。
+#: 现场实测：广角外部相机 + 0.3° 只动 4 像素，质心抖动占 25%，必然失败。
+_MIN_USEFUL_PX = 40.0
 _STEP_RETRIES = 2              # 单步丢目标时自动退回、减半重试的次数
+_GROW_RETRIES = 3              # 因位移太小而放大步长重来的次数上限
 _EDGE_MARGIN_FRAC = 0.08       # 开标前目标离边缘至少要有短边的 8%
 
 # ---- 质量闸 --------------------------------------------------------------
@@ -274,8 +281,11 @@ class Calibrator:
         px_per_deg 是**天球角距**的像元尺度（前面步骤实测得来）。方位轴
         要多转 1/cos(alt) 才能在天球上走出同样角距，所以方位步要除回去。
         没有实测尺度时（第 1 步）只能用配置值。
-        结果永远不超过配置的 step_deg：自适应只负责往小调，
-        用户手工调小 step_deg 仍然完全有效。
+        自适应是**双向**的。只往小调是不够的：广角的外部相机上，
+        配置里那个 0.30° 只能把目标推动几个像素，而质心本身就有 ~1 像素
+        抖动，信噪比低到解出来的矩阵直接被质量闸拒掉（现场就是这么失败的）。
+        软件明明测得出「才动了 4 像素」，就该自己加大步长，而不是让用户
+        去算镜头视场。上限 _STEP_MAX_DEG 兜住，避免一步甩出天际。
         """
         if px_per_deg is None or px_per_deg <= 1e-9:
             return self.step_deg
@@ -285,7 +295,7 @@ class Calibrator:
         deg = want_px / px_per_deg
         if not axis_is_alt:
             deg /= max(_MIN_COS_ALT, math.cos(math.radians(alt_now)))
-        return max(_STEP_MIN_DEG, min(self.step_deg, deg))
+        return max(_STEP_MIN_DEG, min(_STEP_MAX_DEG, deg))
 
     def _get_alt(self, default: float = 45.0) -> float:
         try:
@@ -357,13 +367,18 @@ class Calibrator:
         ang_rows: List[Tuple[float, float]] = []   # (d_az_sky, d_alt)
         applied_az = 0.0
         applied_alt = 0.0
+        grow_tries = 0          # 因位移太小而放大步长重来的次数
         # 天球角距的像元尺度（像素/度），由已走完的步实测得到。
         # 相机的像元尺度两轴通用，所以方位步测出的值可以直接给仰角步定步长
         # —— 这正是「方位两步过关、仰角步却把目标顶出画面」的解药。
         px_per_deg: Optional[float] = None
         shrink_note = ""
 
-        for i in range(4):
+        i = -1
+        while True:
+            i += 1
+            if i >= 4:
+                break
             name = names[i]
             frac0 = 0.05 + 0.20 * i
 
@@ -457,12 +472,39 @@ class Calibrator:
                 drift_note = ("；注意：目标自身移动较快（漂移 %.0f 像素/步），"
                               "标定精度受影响，建议尽量在目标较慢时标定" % drift_mag)
             t_prev, v_prev = t_new, v_new
-            if float(np.hypot(d_px[0], d_px[1])) < _MIN_STEP_PX:
+            disp_now = float(np.hypot(d_px[0], d_px[1]))
+            if disp_now < _MIN_STEP_PX:
                 self._restore(applied_az, applied_alt)
                 return _fail("第 %d 步（%s）目标几乎没有移动（%.2f 像素）。"
                              "步长可能太小或基座未实际转动，"
                              "可调大 calibration.step_deg 后重试。"
-                             % (i + 1, name, float(np.hypot(d_px[0], d_px[1]))))
+                             % (i + 1, name, disp_now))
+
+            # ---- 位移太小 → 自己加大步长重来，别把算术题丢给用户 ----
+            if disp_now < _MIN_USEFUL_PX and grow_tries < _GROW_RETRIES:
+                grow = min(_MIN_USEFUL_PX / max(disp_now, 0.5), 12.0)
+                bigger = min(_STEP_MAX_DEG, step_i * grow)
+                if bigger > step_i * 1.5:
+                    grow_tries += 1
+                    self._report(progress_cb,
+                                 "单步只动了 %.0f 像素，信噪比不够，"
+                                 "改用 %.2f° 重新开始" % (disp_now, bigger),
+                                 frac0)
+                    logger.info("单步位移仅 %.1f px，步长 %.3f° → %.3f° 重来",
+                                disp_now, step_i, bigger)
+                    self._restore(applied_az, applied_alt)
+                    applied_az = applied_alt = 0.0
+                    px_rows.clear()
+                    ang_rows.clear()
+                    self.step_deg = bigger
+                    pair_step = [bigger, bigger]
+                    px_per_deg = None
+                    m0 = self._measure_center_v()
+                    if m0 is None:
+                        return _fail("放大步长后找不到目标了，请重新框选后再标定。")
+                    c_prev, t_prev, v_prev = m0
+                    i = -1          # 从第一步整个重来
+                    continue
 
             # 方位轴角度换成天球角距，保证 A 的奇异值就是像元角尺度。
             cos_alt = max(_MIN_COS_ALT, math.cos(math.radians(alt_now)))
@@ -715,6 +757,42 @@ if __name__ == "__main__":
     assert any("+仰角" in s for s in steps4), "应当真的走到过仰角步"
     log.info("步长自适应回归通过：配置 0.90°，实际标定成功，尺度 %.2f\"/px",
              r4.arcsec_per_px)
+
+    # ---- 回归：广角相机上位移太小时，必须自己加大步长而不是判失败 ----
+    # 复现现场故障：外部广角相机约 18 像素/度，配置 0.30° 只推动 ~5 像素，
+    # 质心抖动占了两成，四步解出来的矩阵被质量闸拒掉 ——
+    # 而软件明明测得出「才动了几个像素」，就该自己把步长加大。
+    WIDE = 6.0 / 3600.0 * 33.0          # 约 18 像素/度（比目镜相机糊 33 倍）
+    A_wide = WIDE * (R @ F)
+    A_wide_inv = np.linalg.inv(A_wide)
+
+    class _WideMount(_FakeMount):
+        pass
+
+    class _WideTracker:
+        def __init__(self, mount):
+            self.mount = mount
+            self.c0 = np.array([640.0, 360.0])
+
+        def update(self, image):
+            c = self.c0 + A_wide_inv @ self.mount.sky + rng.normal(0.0, 0.6, 2)
+            if not (0 <= c[0] < FRAME_W and 0 <= c[1] < FRAME_H):
+                return types.SimpleNamespace(ok=False, center=None)
+            return types.SimpleNamespace(ok=True, center=(float(c[0]), float(c[1])))
+
+    mount7 = _WideMount()
+    cal7 = Calibrator(mount7, _FakeCamera(), _WideTracker(mount7),
+                      step_deg=0.30, settle_s=0.0, samples=3)
+    msgs7 = []
+    r7 = cal7.run(progress_cb=lambda m, f: msgs7.append(m))
+    assert r7.ok, "广角相机上应自动加大步长并标定成功，实际失败：%s" % r7.note
+    assert cal7.step_deg > 0.30, "步长应该被自动放大，实际仍是 %.3f" % cal7.step_deg
+    assert any("信噪比" in m for m in msgs7),         "应当告诉用户为什么要重来，实际消息：%r" % msgs7[:6]
+    got_scale = r7.arcsec_per_px
+    want_scale = 6.0 * 33.0
+    assert abs(got_scale - want_scale) / want_scale < 0.08,         "放大步长后尺度仍应准确：%.1f vs %.1f" % (got_scale, want_scale)
+    log.info("广角相机回归通过：0.30° → %.2f°，尺度 %.0f\"/px（真值 %.0f）",
+             cal7.step_deg, got_scale, want_scale)
 
     # ---- 边缘保护：目标贴着画面边时直接说清楚，别一动就丢 ----
     mount5 = _FakeMount()

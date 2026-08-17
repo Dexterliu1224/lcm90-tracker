@@ -160,27 +160,44 @@ class S3Client:
     而且不像预签名 URL 那样会把凭据暴露在链接里。
     """
 
-    def __init__(self, cfg: CloudConfig, timeout: float = 30.0):
+    def __init__(self, cfg: CloudConfig, timeout: float = 30.0,
+                 style: str = "auto"):
         cfg.check()
         self.cfg = cfg
         self.timeout = float(timeout)
         parsed = urllib.parse.urlparse(cfg.endpoint.rstrip("/"))
         self._scheme = parsed.scheme
-        self._host = parsed.netloc
-        # 路径风格（endpoint/bucket/key）兼容性最好：MinIO、自建网关、
-        # 以及一部分企业内网都不支持 bucket 作为子域名。
-        self._base_path = "/%s" % cfg.bucket
+        self._endpoint_host = parsed.netloc
+        # 两种寻址风格，各家云要求不同，写死哪一种都会有人用不了：
+        #   virtual —— bucket.endpoint/key，阿里云 OSS、火山 TOS、AWS 等公有云
+        #   path    —— endpoint/bucket/key，MinIO、自建网关、企业内网
+        # 默认 auto：先按公有云的习惯试 virtual，被拒了再退回 path，
+        # 成功的那种记下来，后续请求不再来回试。
+        self._style = style if style in ("virtual", "path") else "virtual"
+        self._auto = (style == "auto")
+
+    def _host_and_path(self, key: str) -> Tuple[str, str]:
+        if self._style == "virtual":
+            return ("%s.%s" % (self.cfg.bucket, self._endpoint_host),
+                    "/" + key.lstrip("/") if key else "/")
+        return (self._endpoint_host,
+                "/%s%s" % (self.cfg.bucket,
+                           "/" + key.lstrip("/") if key else ""))
+
+    @property
+    def style(self) -> str:
+        return self._style
 
     # -------- 签名 --------
 
-    def _sign(self, method: str, path: str, query: Dict[str, str],
+    def _sign(self, method: str, host: str, path: str, query: Dict[str, str],
               payload_sha: str, extra_headers: Optional[Dict[str, str]] = None
               ) -> Dict[str, str]:
         now = time.gmtime()
         amz_date = time.strftime("%Y%m%dT%H%M%SZ", now)
         date_stamp = time.strftime("%Y%m%d", now)
 
-        headers = {"host": self._host,
+        headers = {"host": host,
                    "x-amz-content-sha256": payload_sha,
                    "x-amz-date": amz_date}
         if extra_headers:
@@ -214,12 +231,41 @@ class S3Client:
     def _request(self, method: str, key: str, query: Optional[Dict[str, str]] = None,
                  body: bytes = b"", extra_headers: Optional[Dict[str, str]] = None
                  ) -> Tuple[int, Dict[str, str], bytes]:
-        query = query or {}
-        path = self._base_path + ("/" + key.lstrip("/") if key else "")
-        payload_sha = _sha256(body) if body else _EMPTY_SHA256
-        headers = self._sign(method, path, query, payload_sha, extra_headers)
+        try:
+            return self._request_once(method, key, query, body, extra_headers)
+        except CloudError as exc:
+            # 寻址风格猜错的典型症状就是 400/403/404。只在第一次失败时
+            # 换另一种再试一遍，成功就把风格定下来。
+            if not self._auto:
+                raise
+            # 猜错风格有两种表现：
+            #   1) 云端认得这个域名但拒绝请求 → 400/403/404
+            #   2) bucket 拼成子域名后根本解析不了 → 连接/DNS 失败
+            #      （自建 MinIO、直接写 IP 的端点都属于这种）
+            msg = str(exc)
+            if not (any(c in msg for c in ("400", "403", "404"))
+                    or "连不上云端" in msg):
+                raise
+            self._auto = False
+            self._style = "path" if self._style == "virtual" else "virtual"
+            logger.info("按 %s 风格重试寻址", self._style)
+            try:
+                return self._request_once(method, key, query, body, extra_headers)
+            except CloudError:
+                self._style = "path" if self._style == "virtual" else "virtual"
+                raise exc      # 两种都不行：报第一次的错，那个更接近真因
 
-        url = "%s://%s%s" % (self._scheme, self._host, _uriencode(path, False))
+    def _request_once(self, method: str, key: str,
+                      query: Optional[Dict[str, str]] = None,
+                      body: bytes = b"",
+                      extra_headers: Optional[Dict[str, str]] = None
+                      ) -> Tuple[int, Dict[str, str], bytes]:
+        query = query or {}
+        host, path = self._host_and_path(key)
+        payload_sha = _sha256(body) if body else _EMPTY_SHA256
+        headers = self._sign(method, host, path, query, payload_sha, extra_headers)
+
+        url = "%s://%s%s" % (self._scheme, host, _uriencode(path, False))
         if query:
             url += "?" + "&".join("%s=%s" % (_uriencode(k), _uriencode(str(query[k])))
                                   for k in sorted(query))
@@ -784,7 +830,7 @@ if __name__ == "__main__":
     cfg = CloudConfig(enabled=True, endpoint="http://127.0.0.1:%d" % port,
                       bucket="testbucket", access_key="AKIATEST",
                       secret_key="secret123", prefix="lcm90")
-    client = S3Client(cfg)
+    client = S3Client(cfg, style="path")
 
     # ---- 3) 连通性自检 ----
     log.info("ping：%s", client.ping())
@@ -848,7 +894,7 @@ if __name__ == "__main__":
     dead_cfg = CloudConfig(enabled=True, endpoint="http://127.0.0.1:1",
                            bucket="b", access_key="a", secret_key="s")
     try:
-        S3Client(dead_cfg, timeout=1.0).ping()
+        S3Client(dead_cfg, timeout=1.0, style="path").ping()
         raise AssertionError("连不上时应该抛 CloudError")
     except CloudError as exc:
         assert "连不上云端" in str(exc), str(exc)
@@ -884,6 +930,18 @@ if __name__ == "__main__":
     assert merged2["users"]["admin"]["hash"] == "NEW", "本地更新的不该被旧的云端覆盖"
     assert not changed2
     log.info("账号合并按时间戳逐个比较，双向改动都不丢")
+
+    # ---- 11) 寻址风格：auto 要能从 virtual 退回 path ----
+    # mock 只认路径风格（bucket 在 URL 路径里），auto 客户端第一次会按
+    # 公有云习惯试 bucket.host，被拒后应自动改用路径风格并记住。
+    auto = S3Client(cfg)                      # style="auto"
+    assert auto.style == "virtual", "auto 应当先试虚拟主机风格"
+    auto.put_bytes("lcm90/style.txt", b"ok")
+    assert auto.style == "path", "被拒后应回退到路径风格并记住"
+    assert store["lcm90/style.txt"] == b"ok"
+    auto.put_bytes("lcm90/style2.txt", b"ok2")   # 第二次不该再来回试
+    assert store["lcm90/style2.txt"] == b"ok2"
+    log.info("寻址风格自动回退正常：virtual → path，并记住不再重试")
 
     srv.shutdown()
     log.info("cloud selftest OK")
