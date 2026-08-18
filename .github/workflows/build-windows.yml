@@ -68,6 +68,7 @@ jobs:
           --add-data "app/static/login.html;app/static"
           --add-data "app/static/favicon.ico;app/static"
           --add-data "app/static/app-badge.png;app/static"
+          --add-data "app/static/school-logo.png;app/static"
           --collect-submodules app
           --collect-submodules core
           --collect-submodules uvicorn
