@@ -232,6 +232,8 @@ def _open_window(url: str, on_closed) -> bool:
             "LCM90 视觉跟踪台", url,
             width=1440, height=920, min_size=(1100, 720),
             background_color="#050A14",   # 和页面同底色，避免加载时白屏闪一下
+            # 关窗要先确认：跟踪中误点关闭，望远镜会在没人看着的情况下停机
+            confirm_close=True,
             text_select=False)
         try:
             window.events.closed += on_closed
@@ -239,7 +241,11 @@ def _open_window(url: str, on_closed) -> bool:
             # 不同版本的事件 API 略有差异；订阅不上不影响主流程，
             # webview.start() 返回后照样会收尾。
             logger.debug("订阅窗口关闭事件失败", exc_info=True)
-        webview.start()      # 阻塞，直到用户关掉窗口
+        webview.start(localization={
+            "global.quitConfirmation": "确定要关闭吗？关闭后将自动断开基座与相机。",
+            "global.ok": "确定", "global.cancel": "取消",
+            "global.quit": "关闭",
+        })      # 阻塞，直到用户关掉窗口
         return True
     except Exception as exc:
         logger.exception("创建程序窗口失败")

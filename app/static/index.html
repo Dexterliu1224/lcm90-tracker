@@ -274,6 +274,9 @@ dialog .dfoot{padding:12px 18px 16px;display:flex;gap:9px;justify-content:flex-e
   <div class="topbar">
     <div class="brand">
       <div class="sigil">
+        <img id="brand-badge" src="/assets/app-badge.png" alt=""
+             style="width:34px;height:34px;display:none"
+             onload="this.style.display='block';this.nextElementSibling.style.display='none'">
         <svg width="34" height="34" viewBox="0 0 34 34" fill="none" aria-hidden="true">
           <path d="M17 2 L30 9.5 V24.5 L17 32 L4 24.5 V9.5 Z"
                 stroke="#4dd6ff" stroke-width="1.4" opacity=".9"/>
@@ -858,10 +861,20 @@ function renderRec(rec,cameraOpened){
 
 /* ── 账号 ─────────────────────────────────────────────── */
 $("b-logout").onclick=async()=>{
+  if(!confirm("确定退出登录吗？\n退出后将自动断开基座与相机。")) return;
   // 不用管 poll 会不会同时因为 401 也去跳：goLogin 里的 leaving 保证只跳一次
   try{ await act("/api/logout"); }catch(e){}
   goLogin();
 };
+
+/* 关窗确认。只在浏览器/应用模式窗口里生效 —— pywebview 原生窗口有自己的
+   confirm_close 对话框（serve.py 里配置），两边都开会弹两次。
+   leaving 时不拦：退出登录本身已经确认过，跳转不该再问一遍。 */
+window.addEventListener("beforeunload",(e)=>{
+  if(leaving || window.pywebview) return;
+  e.preventDefault();
+  e.returnValue="";     // Chromium 要求赋值才会弹确认
+});
 
 function openPwd(){
   $("pw-old").value=$("pw-new").value=$("pw-new2").value="";

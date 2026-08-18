@@ -120,7 +120,8 @@ recorder = Recorder(_under_root(str(_rec_cfg.get("dir", "data/recordings"))),
 
 #: 不需要登录就能访问的路径。**只有**登录页和登录接口 ——
 #: /video 是实时画面，/api/* 能操控望远镜，一个都不能漏在外面。
-_PUBLIC_PATHS = {"/login", "/api/login", "/favicon.ico"}
+_PUBLIC_PATHS = {"/login", "/api/login", "/favicon.ico",
+                 "/assets/app-badge.png", "/assets/school-logo.png"}
 
 
 @app.middleware("http")
@@ -223,6 +224,28 @@ def login_page():
     return FileResponse(os.path.join(STATIC, "login.html"))
 
 
+@app.get("/favicon.ico")
+def favicon():
+    path = os.path.join(STATIC, "favicon.ico")
+    if not os.path.exists(path):
+        raise HTTPException(404, "no favicon")
+    return FileResponse(path, media_type="image/x-icon")
+
+
+#: 只允许取这两个文件 —— 不做通配静态目录，避免把任意文件暴露出去
+_ASSET_WHITELIST = {"app-badge.png", "school-logo.png"}
+
+
+@app.get("/assets/{name}")
+def asset(name: str):
+    if name not in _ASSET_WHITELIST:
+        raise HTTPException(404, "not found")
+    path = os.path.join(STATIC, name)
+    if not os.path.exists(path):
+        raise HTTPException(404, "not found")
+    return FileResponse(path, media_type="image/png")
+
+
 # ================================================================ 登录与账号
 @app.post("/api/login")
 def api_login(req: LoginReq, response: Response) -> Dict[str, Any]:
@@ -244,9 +267,18 @@ def api_login(req: LoginReq, response: Response) -> Dict[str, Any]:
 
 @app.post("/api/logout")
 def api_logout(request: Request, response: Response) -> Dict[str, Any]:
+    # 退出登录 = 交还设备。不断开的话，串口和相机被这个进程占着，
+    # 下一个人（或下一次启动）打开就会卡住/失败。全部尽力而为，
+    # 任何一步失败都不能挡住退出本身。
+    for fn in (recorder.stop, session.stop_tracking,
+               session.disconnect_mount, session.close_camera):
+        try:
+            fn()
+        except Exception:
+            log.exception("退出登录时收尾失败：%s", getattr(fn, "__name__", fn))
     sessions.drop(request.cookies.get(SESSION_COOKIE))
     response.delete_cookie(SESSION_COOKIE)
-    return {"ok": True, "message": "已退出登录。"}
+    return {"ok": True, "message": "已退出登录，基座与相机已断开。"}
 
 
 @app.get("/api/me")

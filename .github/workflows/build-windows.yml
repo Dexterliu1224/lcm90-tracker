@@ -58,6 +58,7 @@ jobs:
           --noconfirm
           --onedir
           --windowed
+          --icon app.ico
           --name lcm90-tracker
           --collect-all webview
           --collect-all pythonnet
@@ -65,6 +66,8 @@ jobs:
           --hidden-import clr
           --add-data "app/static/index.html;app/static"
           --add-data "app/static/login.html;app/static"
+          --add-data "app/static/favicon.ico;app/static"
+          --add-data "app/static/app-badge.png;app/static"
           --collect-submodules app
           --collect-submodules core
           --collect-submodules uvicorn
